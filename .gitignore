@@ -1,0 +1,31 @@
+# PlatformIO
+.pio/
+.vscode/.browse_c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# Secrets
+.env
+*.secret
+secrets.*
+config.local.*
+wifi_credentials.*
+tokens.*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Temporary
+*.tmp
+*.log
+
+# Evidence raw/temp
+evidencias/raw/
+
+# Build/export
+dist/
+build/
