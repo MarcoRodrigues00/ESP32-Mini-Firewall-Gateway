@@ -1,0 +1,5 @@
+# Hardening
+
+## Pendente
+
+Documento pendente.
