@@ -1,0 +1,11 @@
+{
+  "project": "ESP32 Mini Firewall Gateway",
+  "version": "0.2.0-fase1",
+  "phase": "Fase 1 - Wi-Fi AP minimo e dashboard base",
+  "uptimeSeconds": 586,
+  "freeHeap": 249348,
+  "minFreeHeap": 232944,
+  "apSsid": "ESP32-Firewall-Lab",
+  "apIp": "192.168.4.1",
+  "status": "ok"
+}
