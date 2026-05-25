@@ -66,6 +66,14 @@ http://192.168.4.1
 
 ## Estado atual
 
-Fase 1: Wi-Fi AP mínimo e dashboard web base com abas obrigatórias.
+Fase 2: Wi-Fi AP mínimo, dashboard web base com abas obrigatórias, múltiplas tasks FreeRTOS e métricas iniciais de performance.
 
-Ainda não foram implementados firewall didático, sensores, persistência, logs exportáveis, configuração dinâmica, gerenciamento de energia e múltiplas tasks dedicadas.
+Implementado nesta fase:
+
+- `taskWebServer` para atendimento do `WebServer.h`;
+- `taskMetrics` para atualizar snapshot de uptime, heap, flash/sketch e estado do AP;
+- `taskHeartbeat` para heartbeat serial a cada 5 segundos;
+- proteção do snapshot compartilhado com mutex FreeRTOS;
+- medição inicial com `micros()` para `buildStatusJson` e `handleRoot`.
+
+Ainda não foram implementados firewall didático, sensores, persistência, logs exportáveis, configuração dinâmica, gerenciamento de energia, ISR e atuadores físicos.

@@ -1,0 +1,60 @@
+{
+  "project": "ESP32 Mini Firewall Gateway",
+  "version": "0.3.0-fase2",
+  "phase": "Fase 2 - FreeRTOS e metricas de performance",
+  "uptimeSeconds": 159,
+  "freeHeap": 232920,
+  "minFreeHeap": 213088,
+  "flashSize": 4194304,
+  "sketchSize": 791280,
+  "apSsid": "ESP32-Firewall-Lab",
+  "apIp": "192.168.4.1",
+  "tasks": [
+    {
+      "name": "taskWebServer",
+      "core": 1,
+      "status": "ativa",
+      "stackHighWatermark": "pendente"
+    },
+    {
+      "name": "taskMetrics",
+      "core": 0,
+      "status": "ativa",
+      "stackHighWatermark": "pendente"
+    },
+    {
+      "name": "taskHeartbeat",
+      "core": 0,
+      "status": "ativa",
+      "stackHighWatermark": "pendente"
+    }
+  ],
+  "functionTimings": [
+    {
+      "name": "buildStatusJson",
+      "lastMicros": 384,
+      "measured": true
+    },
+    {
+      "name": "handleRoot",
+      "lastMicros": 24770,
+      "measured": true
+    },
+    {
+      "name": "taskMetrics",
+      "lastMicros": 0,
+      "measured": false
+    },
+    {
+      "name": "taskWebServer",
+      "lastMicros": 0,
+      "measured": false
+    },
+    {
+      "name": "taskHeartbeat",
+      "lastMicros": 0,
+      "measured": false
+    }
+  ],
+  "status": "ok"
+}
