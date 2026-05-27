@@ -14,11 +14,15 @@ A base atual compila para `esp32dev` e inclui:
 - servidor web embarcado na porta 80;
 - dashboard principal em `/` com abas obrigatorias;
 - API de status em `/api/status`;
-- pagina leve de evidencias em `/evidencias`;
+- pagina de evidencias em `/evidencias`;
+- sistema de eventos em memoria com buffer circular;
+- API de eventos em `/api/events`;
+- pagina de eventos em `/logs` e alias `/eventos`;
+- rotas demo controladas para gerar eventos de apresentacao;
 - tasks FreeRTOS para web server, metricas e heartbeat;
 - metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP e tempos de funcoes.
 
-Ainda estao planejados para fases posteriores: firewall didatico completo, sensores reais, atuadores, logs persistentes, configuracao dinamica, interrupcao de hardware e gerenciamento de energia.
+Ainda estao planejados para fases posteriores: firewall didatico completo, sensores reais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia.
 
 ## Componentes planejados
 
@@ -71,7 +75,13 @@ Rotas principais:
 
 - Dashboard: `http://192.168.4.1/`
 - Evidencias: `http://192.168.4.1/evidencias`
+- Eventos: `http://192.168.4.1/logs`
+- Alias de eventos: `http://192.168.4.1/eventos`
 - API de status: `http://192.168.4.1/api/status`
+- API de eventos: `http://192.168.4.1/api/events`
+- Demo INFO: `http://192.168.4.1/demo/info`
+- Demo WARN: `http://192.168.4.1/demo/warn`
+- Demo SECURITY: `http://192.168.4.1/demo/security`
 
 ## API de status
 
@@ -85,8 +95,30 @@ A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
 - `free_heap`;
 - `modules`.
 
-Campos legados tambem foram mantidos para compatibilidade com o dashboard atual.
+Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount` e `eventCapacity`.
+
+## API de eventos
+
+A rota `/api/events` retorna JSON leve sem dados sensiveis, com:
+
+- `count`;
+- `capacity`;
+- `events`.
+
+Cada evento contem `id`, `uptime_ms`, `level`, `source`, `message` e, quando aplicavel, `value`. O buffer e circular, fica somente em RAM e guarda os ultimos 40 eventos. Ao reiniciar a placa, o historico em memoria e perdido; persistencia em LittleFS fica para fase posterior.
+
+Eventos automaticos atuais:
+
+- boot do sistema;
+- inicio do Wi-Fi AP;
+- inicio do servidor web;
+- acesso a `/evidencias`;
+- acesso a `/api/status`;
+- acesso a `/api/events`;
+- acesso a `/logs` ou `/eventos`.
+
+As rotas `/demo/info`, `/demo/warn` e `/demo/security` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` foi desenhada para ser simples e legivel em prints no Ubuntu.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` foi atualizada para mostrar versao, IP local, Wi-Fi, uptime, heap livre, status dos modulos, quantidade de eventos registrados e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.

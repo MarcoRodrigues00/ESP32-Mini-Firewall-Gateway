@@ -1,22 +1,27 @@
 #include <Arduino.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <cstdio>
 #include <cstring>
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.4.0-sprint-evidencias";
-constexpr const char *PROJECT_PHASE = "Sprint evidencias - base demonstravel";
+constexpr const char *PROJECT_VERSION = "0.5.0-sprint-eventos";
+constexpr const char *PROJECT_PHASE = "Sprint eventos em memoria e polimento visual";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSWORD = "esp32lab123";
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
 constexpr uint32_t WEB_SERVER_INTERVAL_MS = 10UL;
 constexpr uint32_t METRICS_INTERVAL_MS = 1000UL;
+constexpr size_t EVENT_CAPACITY = 40;
+constexpr size_t EVENT_MESSAGE_SIZE = 72;
+constexpr size_t EVENT_VALUE_SIZE = 24;
 constexpr BaseType_t CORE_WEB = 1;
 constexpr BaseType_t CORE_BACKGROUND = 0;
 
 WebServer server(80);
 SemaphoreHandle_t metricsMutex = nullptr;
+SemaphoreHandle_t eventsMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
 TaskHandle_t metricsTaskHandle = nullptr;
 TaskHandle_t heartbeatTaskHandle = nullptr;
@@ -45,8 +50,19 @@ const ModuleInfo MODULES[] = {
     {"Firewall didatico", "planejado"},
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
-    {"Logs e persistencia", "planejado"},
+    {"Eventos em memoria", "ativo"},
+    {"Logs persistentes", "planejado"},
     {"Energia", "planejado"},
+};
+
+struct EventRecord {
+    uint32_t id;
+    unsigned long uptimeMs;
+    char level[10];
+    char source[12];
+    char message[EVENT_MESSAGE_SIZE];
+    char value[EVENT_VALUE_SIZE];
+    bool hasValue;
 };
 
 struct MetricsSnapshot {
@@ -72,6 +88,10 @@ struct FunctionTiming {
 };
 
 MetricsSnapshot metricsSnapshot = {};
+EventRecord events[EVENT_CAPACITY] = {};
+size_t eventStart = 0;
+size_t eventCount = 0;
+uint32_t nextEventId = 1;
 
 unsigned long uptimeSeconds()
 {
@@ -86,6 +106,65 @@ void copyText(char *target, size_t targetSize, const char *source)
 
     std::strncpy(target, source, targetSize - 1);
     target[targetSize - 1] = '\0';
+}
+
+void appendJsonEscaped(String &json, const char *text)
+{
+    for (const char *cursor = text; *cursor != '\0'; ++cursor) {
+        if (*cursor == '"' || *cursor == '\\') {
+            json += '\\';
+        }
+        json += *cursor;
+    }
+}
+
+void addEvent(const char *level, const char *source, const char *message, const char *value = nullptr)
+{
+    if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return;
+    }
+
+    const size_t writeIndex = (eventStart + eventCount) % EVENT_CAPACITY;
+    EventRecord &event = events[writeIndex];
+    event.id = nextEventId++;
+    event.uptimeMs = millis();
+    copyText(event.level, sizeof(event.level), level);
+    copyText(event.source, sizeof(event.source), source);
+    copyText(event.message, sizeof(event.message), message);
+    event.hasValue = value != nullptr && value[0] != '\0';
+    copyText(event.value, sizeof(event.value), event.hasValue ? value : "");
+
+    if (eventCount < EVENT_CAPACITY) {
+        ++eventCount;
+    } else {
+        eventStart = (eventStart + 1) % EVENT_CAPACITY;
+    }
+
+    xSemaphoreGive(eventsMutex);
+}
+
+size_t readEventCount()
+{
+    size_t count = 0;
+    if (eventsMutex != nullptr && xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        count = eventCount;
+        xSemaphoreGive(eventsMutex);
+    }
+    return count;
+}
+
+const char *levelClass(const char *level)
+{
+    if (std::strcmp(level, "WARN") == 0) {
+        return "warn";
+    }
+    if (std::strcmp(level, "ERROR") == 0) {
+        return "error";
+    }
+    if (std::strcmp(level, "SECURITY") == 0) {
+        return "security";
+    }
+    return "info";
 }
 
 MetricsSnapshot readMetricsSnapshot()
@@ -153,54 +232,174 @@ void appendModulesJson(String &json)
     json += "]";
 }
 
+void appendEventJsonObject(String &json, const EventRecord &event)
+{
+    json += "{\"id\":";
+    json += event.id;
+    json += ",\"uptime_ms\":";
+    json += event.uptimeMs;
+    json += ",\"level\":\"";
+    appendJsonEscaped(json, event.level);
+    json += "\",\"source\":\"";
+    appendJsonEscaped(json, event.source);
+    json += "\",\"message\":\"";
+    appendJsonEscaped(json, event.message);
+    json += "\"";
+    if (event.hasValue) {
+        json += ",\"value\":\"";
+        appendJsonEscaped(json, event.value);
+        json += "\"";
+    }
+    json += "}";
+}
+
+String buildEventsJson()
+{
+    String json;
+    json.reserve(3600);
+    json += "{\"count\":";
+
+    if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        json += "0,\"capacity\":";
+        json += EVENT_CAPACITY;
+        json += ",\"events\":[]}";
+        return json;
+    }
+
+    json += eventCount;
+    json += ",\"capacity\":";
+    json += EVENT_CAPACITY;
+    json += ",\"events\":[";
+    for (size_t offset = 0; offset < eventCount; ++offset) {
+        if (offset > 0) {
+            json += ",";
+        }
+        const size_t index = (eventStart + offset) % EVENT_CAPACITY;
+        appendEventJsonObject(json, events[index]);
+    }
+    json += "]}";
+    xSemaphoreGive(eventsMutex);
+    return json;
+}
+
+void appendRecentEventsHtml(String &html, size_t limit)
+{
+    if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        html += F("<p class=\"note\">Eventos indisponiveis.</p>");
+        return;
+    }
+
+    if (eventCount == 0) {
+        html += F("<p class=\"note\">Nenhum evento registrado.</p>");
+        xSemaphoreGive(eventsMutex);
+        return;
+    }
+
+    const size_t rows = eventCount < limit ? eventCount : limit;
+    html += F("<div class=\"event-list\">");
+    for (size_t offset = 0; offset < rows; ++offset) {
+        const size_t newestOffset = eventCount - 1 - offset;
+        const size_t index = (eventStart + newestOffset) % EVENT_CAPACITY;
+        const EventRecord &event = events[index];
+        html += F("<article class=\"event-card\"><div><span class=\"badge ");
+        html += levelClass(event.level);
+        html += F("\">");
+        html += event.level;
+        html += F("</span><strong>");
+        html += event.source;
+        html += F("</strong></div><p>");
+        html += event.message;
+        if (event.hasValue) {
+            html += F(" <span class=\"muted\">");
+            html += event.value;
+            html += F("</span>");
+        }
+        html += F("</p><small>#");
+        html += event.id;
+        html += F(" - ");
+        html += event.uptimeMs;
+        html += F(" ms</small></article>");
+    }
+    html += F("</div>");
+    xSemaphoreGive(eventsMutex);
+}
+
+String sharedPageStyle()
+{
+    String css;
+    css.reserve(2600);
+    css += F(":root{--bg:#eef2f7;--panel:#fff;--text:#17212f;--muted:#607086;--line:#d5dde8;--nav:#0b2538;--accent:#087f8c;--ok:#0f766e;--wait:#9a6700;--warn:#b45309;--err:#b91c1c;--sec:#6d28d9}");
+    css += F("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif}a{color:#0969a2;text-decoration:none}a:hover{text-decoration:underline}");
+    css += F("header{background:linear-gradient(135deg,#0b2538,#123c55);color:#fff;padding:22px}header .wrap,main{width:min(1120px,100%);margin:0 auto}h1{margin:0 0 6px;font-size:26px;line-height:1.18}header p{margin:0;color:#d8e5ef;line-height:1.45}");
+    css += F("main{padding:18px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 16px}.btn,button.tab{border:1px solid var(--line);background:#fff;color:var(--text);padding:10px 12px;border-radius:7px;min-height:40px;cursor:pointer}.btn.primary,button.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}");
+    css += F("section,.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 8px 22px rgba(15,35,55,.06)}section{display:none}section.active{display:block}h2,h3{margin:0 0 12px}h2{font-size:20px}h3{font-size:16px;margin-top:18px}.note,.muted{color:var(--muted);line-height:1.5}");
+    css += F(".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.metric{border:1px solid var(--line);border-radius:8px;padding:13px;background:#fbfdff}.metric strong{display:block;font-size:12px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}.metric span{font-size:18px;word-break:break-word}");
+    css += F("table{width:100%;border-collapse:collapse;margin-top:8px;background:#fbfdff}th,td{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:13px}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:12px;font-weight:700;margin-right:6px}.ok,.info{background:#dff7f3;color:#0f766e}.planned,.wait{background:#fff4d6;color:#8a5a00}.warn{background:#ffedd5;color:var(--warn)}.error{background:#fee2e2;color:var(--err)}.security{background:#ede9fe;color:var(--sec)}");
+    css += F(".event-list{display:grid;gap:10px}.event-card{border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:8px;padding:11px;background:#fbfdff}.event-card p{margin:8px 0}.event-card small{color:var(--muted)}code{background:#eef2f6;padding:2px 4px;border-radius:4px}@media(max-width:640px){header{padding:18px}main{padding:12px}.metric span{font-size:16px}}");
+    return css;
+}
+
 String evidencePage()
 {
     const MetricsSnapshot snapshot = readMetricsSnapshot();
+    const size_t count = readEventCount();
     String html;
-    html.reserve(5200);
-    html += F("<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">");
-    html += F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    html += F("<title>Evidencias - ESP32 Mini Firewall Gateway</title>");
-    html += F("<style>");
-    html += F(":root{--bg:#f6f7f9;--panel:#fff;--text:#1f2933;--muted:#52616f;--line:#d7dde5;--ok:#0f766e;--wait:#8a5a00}");
-    html += F("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif}");
-    html += F("header{padding:18px 22px;background:#102a43;color:#fff}h1{margin:0 0 6px;font-size:24px}header p{margin:0;color:#d9e2ec}");
-    html += F("main{width:min(1050px,100%);margin:0 auto;padding:16px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}");
-    html += F(".metric,section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}.metric strong{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}.metric span{font-size:18px;word-break:break-word}");
-    html += F("section{margin-top:14px}h2{font-size:18px;margin:0 0 10px}table{width:100%;border-collapse:collapse;background:#fbfdff}th,td{border:1px solid var(--line);padding:8px;text-align:left}th{color:var(--muted);font-size:13px}");
-    html += F(".ok{color:var(--ok);font-weight:700}.wait{color:var(--wait);font-weight:700}.note{color:var(--muted);line-height:1.45}a{color:#0f5f9c}</style></head><body>");
-    html += F("<header><h1>");
+    html.reserve(7200);
+    html += F("<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    html += F("<title>Evidencias - ESP32 Mini Firewall Gateway</title><style>");
+    html += sharedPageStyle();
+    html += F("</style></head><body><header><div class=\"wrap\"><h1>");
     html += PROJECT_NAME;
-    html += F("</h1><p>Pagina leve para prints de evidencia do TDE academico.</p></header><main>");
-    html += F("<div class=\"grid\">");
-    html += F("<div class=\"metric\"><strong>Versao do firmware</strong><span>");
+    html += F("</h1><p>Pagina para prints de evidencia do TDE, com dados reais expostos pelo firmware em execucao.</p></div></header><main>");
+    html += F("<div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Eventos</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a></div>");
+    html += F("<div class=\"grid\"><div class=\"metric\"><strong>Versao</strong><span>");
     html += PROJECT_VERSION;
     html += F("</span></div><div class=\"metric\"><strong>IP local</strong><span>");
     html += snapshot.apIp[0] != '\0' ? snapshot.apIp : "n/d";
-    html += F("</span></div><div class=\"metric\"><strong>Status do Wi-Fi</strong><span>");
+    html += F("</span></div><div class=\"metric\"><strong>Wi-Fi</strong><span><span class=\"badge ok\">");
     html += WiFi.getMode() == WIFI_AP ? "AP ativo" : "n/d";
-    html += F("</span></div><div class=\"metric\"><strong>Uptime</strong><span>");
+    html += F("</span></span></div><div class=\"metric\"><strong>Uptime</strong><span>");
     html += snapshot.uptimeSeconds;
     html += F("s</span></div><div class=\"metric\"><strong>Heap livre</strong><span>");
     html += snapshot.freeHeap;
-    html += F(" bytes</span></div><div class=\"metric\"><strong>SSID AP</strong><span>");
-    html += snapshot.apSsid[0] != '\0' ? snapshot.apSsid : "n/d";
+    html += F(" bytes</span></div><div class=\"metric\"><strong>Eventos</strong><span>");
+    html += count;
+    html += F("/");
+    html += EVENT_CAPACITY;
     html += F("</span></div></div>");
-    html += F("<section><h2>Status dos modulos principais</h2><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody>");
+    html += F("<div class=\"panel\" style=\"margin-top:14px\"><h2>Status dos modulos</h2><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody>");
     for (size_t index = 0; index < sizeof(MODULES) / sizeof(MODULES[0]); ++index) {
         const bool active = std::strcmp(MODULES[index].status, "ativo") == 0;
         html += F("<tr><td>");
         html += MODULES[index].name;
-        html += F("</td><td class=\"");
-        html += active ? "ok" : "wait";
+        html += F("</td><td><span class=\"badge ");
+        html += active ? "ok" : "planned";
         html += F("\">");
         html += MODULES[index].status;
-        html += F("</td></tr>");
+        html += F("</span></td></tr>");
     }
-    html += F("</tbody></table></section>");
-    html += F("<section><h2>Ultimos eventos</h2><p class=\"note\">Placeholder: sistema de logs persistente ainda nao foi implementado. Eventos esperados nesta sprint: boot, Wi-Fi AP iniciado, servidor web iniciado e consulta de status.</p></section>");
-    html += F("<section><h2>Links de verificacao</h2><p><a href=\"/\">Dashboard</a> | <a href=\"/api/status\">API de status</a></p></section>");
-    html += F("</main></body></html>");
+    html += F("</tbody></table></div><div class=\"panel\" style=\"margin-top:14px\"><h2>Ultimos 5 eventos reais</h2>");
+    appendRecentEventsHtml(html, 5);
+    html += F("</div></main></body></html>");
+    return html;
+}
+
+String logsPage()
+{
+    const size_t count = readEventCount();
+    String html;
+    html.reserve(7600);
+    html += F("<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Eventos - ESP32 Mini Firewall Gateway</title><style>");
+    html += sharedPageStyle();
+    html += F("</style></head><body><header><div class=\"wrap\"><h1>Eventos do sistema</h1><p>Buffer circular em memoria para demonstracao, diagnostico rapido e coleta de evidencias.</p></div></header><main>");
+    html += F("<div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/api/events\">JSON</a><a class=\"btn\" href=\"/demo/info\">Demo INFO</a><a class=\"btn\" href=\"/demo/warn\">Demo WARN</a><a class=\"btn\" href=\"/demo/security\">Demo SECURITY</a></div>");
+    html += F("<div class=\"grid\"><div class=\"metric\"><strong>Eventos registrados</strong><span>");
+    html += count;
+    html += F("</span></div><div class=\"metric\"><strong>Capacidade</strong><span>");
+    html += EVENT_CAPACITY;
+    html += F("</span></div><div class=\"metric\"><strong>Persistencia</strong><span>RAM</span></div></div><div class=\"panel\" style=\"margin-top:14px\"><h2>Eventos recentes</h2>");
+    appendRecentEventsHtml(html, EVENT_CAPACITY);
+    html += F("</div></main></body></html>");
     return html;
 }
 
@@ -214,278 +413,45 @@ String htmlPage()
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ESP32 Mini Firewall Gateway</title>
   <style>
-    :root {
-      color-scheme: light;
-      --bg: #f4f6f8;
-      --panel: #ffffff;
-      --text: #1f2933;
-      --muted: #5c6f82;
-      --line: #d8e0e8;
-      --accent: #0f766e;
-      --accent-strong: #115e59;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-    header {
-      background: #102a43;
-      color: #ffffff;
-      padding: 20px;
-    }
-    header h1 {
-      margin: 0 0 6px;
-      font-size: 24px;
-      line-height: 1.2;
-    }
-    header p {
-      margin: 0;
-      color: #d9e2ec;
-      line-height: 1.4;
-    }
-    main {
-      width: min(1100px, 100%);
-      margin: 0 auto;
-      padding: 16px;
-    }
-    nav {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-bottom: 16px;
-    }
-    button.tab {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      color: var(--text);
-      padding: 10px 12px;
-      border-radius: 6px;
-      cursor: pointer;
-      min-height: 40px;
-    }
-    button.tab.active {
-      background: var(--accent);
-      border-color: var(--accent-strong);
-      color: #ffffff;
-    }
-    section {
-      display: none;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
-    }
-    section.active { display: block; }
-    h2, h3 { margin: 0 0 12px; }
-    h2 { font-size: 20px; }
-    h3 { font-size: 16px; margin-top: 18px; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 12px;
-    }
-    .metric {
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 12px;
-      background: #fbfdff;
-    }
-    .metric strong {
-      display: block;
-      font-size: 13px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    .metric span {
-      font-size: 18px;
-      word-break: break-word;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 8px;
-      background: #fbfdff;
-    }
-    th, td {
-      border: 1px solid var(--line);
-      padding: 8px;
-      text-align: left;
-      vertical-align: top;
-    }
-    th {
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-    }
-    .note {
-      color: var(--muted);
-      line-height: 1.5;
-    }
-    code {
-      background: #eef2f6;
-      padding: 2px 4px;
-      border-radius: 4px;
-    }
+    :root{--bg:#eef2f7;--panel:#fff;--text:#17212f;--muted:#607086;--line:#d5dde8;--nav:#0b2538;--accent:#087f8c;--ok:#0f766e;--wait:#9a6700;--warn:#b45309;--sec:#6d28d9}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif}a{color:#0969a2;text-decoration:none}a:hover{text-decoration:underline}
+    header{background:linear-gradient(135deg,#0b2538,#123c55);color:#fff;padding:22px}header .wrap,main{width:min(1120px,100%);margin:0 auto}h1{margin:0 0 6px;font-size:26px;line-height:1.18}header p{margin:0;color:#d8e5ef;line-height:1.45}
+    main{padding:18px}.toplinks{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}.linkbtn,button.tab{border:1px solid var(--line);background:#fff;color:var(--text);padding:10px 12px;border-radius:7px;min-height:40px;cursor:pointer}.linkbtn.primary,button.tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+    nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}section{display:none;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px;box-shadow:0 8px 22px rgba(15,35,55,.06)}section.active{display:block}h2,h3{margin:0 0 12px}h2{font-size:20px}h3{font-size:16px;margin-top:18px}.note,.muted{color:var(--muted);line-height:1.5}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.metric{border:1px solid var(--line);border-radius:8px;padding:13px;background:#fbfdff}.metric strong{display:block;font-size:12px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}.metric span{font-size:18px;word-break:break-word}
+    table{width:100%;border-collapse:collapse;margin-top:8px;background:#fbfdff}th,td{border-bottom:1px solid var(--line);padding:9px;text-align:left;vertical-align:top}th{color:var(--muted);font-size:13px}.badge{display:inline-block;border-radius:999px;padding:4px 8px;font-size:12px;font-weight:700}.ok,.info{background:#dff7f3;color:var(--ok)}.planned,.wait{background:#fff4d6;color:#8a5a00}.warn{background:#ffedd5;color:var(--warn)}.security{background:#ede9fe;color:var(--sec)}code{background:#eef2f6;padding:2px 4px;border-radius:4px}@media(max-width:640px){header{padding:18px}main{padding:12px}.metric span{font-size:16px}}
   </style>
 </head>
 <body>
-  <header>
-    <h1>ESP32 Mini Firewall Gateway</h1>
-    <p>Projeto didatico/de laboratorio. Nao substitui firewall profissional.</p>
-  </header>
+  <header><div class="wrap"><h1>ESP32 Mini Firewall Gateway</h1><p>Monitor ciberfisico didatico em ESP32, com metricas, eventos em memoria e dashboard local. Nao substitui firewall profissional.</p></div></header>
   <main>
+    <div class="toplinks"><a class="linkbtn primary" href="/evidencias">Evidencias</a><a class="linkbtn" href="/logs">Eventos</a><a class="linkbtn" href="/api/status">API status</a><a class="linkbtn" href="/api/events">API eventos</a></div>
     <nav aria-label="Abas principais">
-      <button class="tab active" data-tab="performance">Performance</button>
-      <button class="tab" data-tab="firewall">Firewall</button>
-      <button class="tab" data-tab="clientes">Clientes</button>
-      <button class="tab" data-tab="logs">Logs</button>
-      <button class="tab" data-tab="configuracao">Configuracao</button>
-      <button class="tab" data-tab="sobre">Sobre</button>
-      <button class="tab" data-tab="changelog">Changelog</button>
+      <button class="tab active" data-tab="performance">Performance</button><button class="tab" data-tab="firewall">Firewall</button><button class="tab" data-tab="clientes">Clientes</button><button class="tab" data-tab="logs">Logs</button><button class="tab" data-tab="configuracao">Configuracao</button><button class="tab" data-tab="sobre">Sobre</button><button class="tab" data-tab="changelog">Changelog</button>
     </nav>
-
     <section id="performance" class="active">
       <h2>Performance</h2>
       <div class="grid">
-        <div class="metric"><strong>Status</strong><span id="status">n/d</span></div>
-        <div class="metric"><strong>Uptime</strong><span id="uptime">n/d</span></div>
-        <div class="metric"><strong>Heap livre</strong><span id="freeHeap">n/d</span></div>
-        <div class="metric"><strong>Heap minimo</strong><span id="minFreeHeap">n/d</span></div>
-        <div class="metric"><strong>Flash</strong><span id="flashSize">n/d</span></div>
-        <div class="metric"><strong>Sketch</strong><span id="sketchSize">n/d</span></div>
-        <div class="metric"><strong>SSID AP</strong><span id="apSsid">n/d</span></div>
-        <div class="metric"><strong>IP AP</strong><span id="apIp">n/d</span></div>
+        <div class="metric"><strong>Status</strong><span id="status">n/d</span></div><div class="metric"><strong>Uptime</strong><span id="uptime">n/d</span></div><div class="metric"><strong>Heap livre</strong><span id="freeHeap">n/d</span></div><div class="metric"><strong>Heap minimo</strong><span id="minFreeHeap">n/d</span></div><div class="metric"><strong>Flash</strong><span id="flashSize">n/d</span></div><div class="metric"><strong>Sketch</strong><span id="sketchSize">n/d</span></div><div class="metric"><strong>SSID AP</strong><span id="apSsid">n/d</span></div><div class="metric"><strong>IP AP</strong><span id="apIp">n/d</span></div><div class="metric"><strong>Eventos</strong><span id="eventCount">n/d</span></div>
       </div>
-
-      <h3>Tasks FreeRTOS</h3>
-      <table aria-label="Tasks FreeRTOS">
-        <thead>
-          <tr><th>Nome</th><th>Core planejado</th><th>Status</th><th>Stack high watermark</th></tr>
-        </thead>
-        <tbody id="tasksTable">
-          <tr><td colspan="4">n/d</td></tr>
-        </tbody>
-      </table>
-
-      <h3>Tempos de execucao</h3>
-      <table aria-label="Tempos de execucao">
-        <thead>
-          <tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr>
-        </thead>
-        <tbody id="timingsTable">
-          <tr><td colspan="3">n/d</td></tr>
-        </tbody>
-      </table>
-      <p class="note">Stack high watermark por task, graficos, series temporais e tempos de pelo menos cinco funcoes serao refinados nas proximas fases.</p>
+      <h3>Tasks FreeRTOS</h3><table aria-label="Tasks FreeRTOS"><thead><tr><th>Nome</th><th>Core planejado</th><th>Status</th><th>Stack high watermark</th></tr></thead><tbody id="tasksTable"><tr><td colspan="4">n/d</td></tr></tbody></table>
+      <h3>Tempos de execucao</h3><table aria-label="Tempos de execucao"><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id="timingsTable"><tr><td colspan="3">n/d</td></tr></tbody></table>
+      <p class="note">Stack high watermark por task, graficos e series temporais serao refinados nas proximas fases.</p>
     </section>
-
-    <section id="firewall">
-      <h2>Firewall</h2>
-      <p class="note">Firewall didatico sera implementado na Fase 4. Esta interface nao inspeciona HTTPS e nao substitui firewall profissional.</p>
-    </section>
-
-    <section id="clientes">
-      <h2>Clientes</h2>
-      <p class="note">Lista e contadores de clientes conectados ao AP serao detalhados em fase posterior.</p>
-    </section>
-
-    <section id="logs">
-      <h2>Logs</h2>
-      <p class="note">Logs INFO, WARN, ERROR, SECURITY e exportacao serao implementados na Fase 3.</p>
-    </section>
-
-    <section id="configuracao">
-      <h2>Configuracao</h2>
-      <p class="note">Configuracao dinamica e persistencia em NVS serao implementadas em fase posterior.</p>
-    </section>
-
-    <section id="sobre">
-      <h2>Sobre</h2>
-      <p>PUCPR</p>
-      <p>Engenharia de Software</p>
-      <p>Performance de Sistemas Ciberfisicos</p>
-      <p>ESP32 Mini Firewall Gateway</p>
-      <p>Projeto didatico/de laboratorio. Nao substitui firewall profissional.</p>
-    </section>
-
-    <section id="changelog">
-      <h2>Changelog</h2>
-      <p class="note">Versao 0.3.0-fase2: FreeRTOS com tasks minimas e metricas de performance.</p>
-      <p class="note">Versao 0.2.0-fase1: Wi-Fi AP minimo e dashboard web base.</p>
-    </section>
+    <section id="firewall"><h2>Firewall</h2><p class="note">Firewall didatico sera implementado na Fase 4. Esta interface nao inspeciona HTTPS e nao substitui firewall profissional.</p></section>
+    <section id="clientes"><h2>Clientes</h2><p class="note">Lista e contadores de clientes conectados ao AP serao detalhados em fase posterior.</p></section>
+    <section id="logs"><h2>Logs e eventos</h2><div class="grid"><div class="metric"><strong>Buffer em RAM</strong><span id="eventSummary">n/d</span></div><div class="metric"><strong>Niveis</strong><span>INFO/WARN/ERROR/SECURITY</span></div></div><p class="note"><a href="/logs">Abrir pagina completa de eventos</a> ou consultar <code>/api/events</code>.</p><p><a class="linkbtn" href="/demo/info">Demo INFO</a> <a class="linkbtn" href="/demo/warn">Demo WARN</a> <a class="linkbtn" href="/demo/security">Demo SECURITY</a></p></section>
+    <section id="configuracao"><h2>Configuracao</h2><p class="note">Configuracao dinamica e persistencia em NVS serao implementadas em fase posterior.</p></section>
+    <section id="sobre"><h2>Sobre</h2><p>PUCPR</p><p>Engenharia de Software</p><p>Performance de Sistemas Ciberfisicos</p><p>ESP32 Mini Firewall Gateway</p><p>Projeto didatico/de laboratorio. Nao substitui firewall profissional.</p></section>
+    <section id="changelog"><h2>Changelog</h2><p class="note">Versao 0.5.0-sprint-eventos: eventos em memoria, API de eventos, pagina de logs e polimento visual.</p><p class="note">Versao 0.4.0-sprint-evidencias: pagina de evidencias e API de status demonstravel.</p><p class="note">Versao 0.3.0-fase2: FreeRTOS com tasks minimas e metricas de performance.</p></section>
   </main>
-
   <script>
-    const tabs = document.querySelectorAll('button.tab');
-    const sections = document.querySelectorAll('main section');
-
-    tabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        const target = tab.dataset.tab;
-        tabs.forEach((item) => item.classList.toggle('active', item === tab));
-        sections.forEach((section) => section.classList.toggle('active', section.id === target));
-      });
-    });
-
-    function formatBytes(value) {
-      if (typeof value !== 'number' || value <= 0) {
-        return 'n/d';
-      }
-      return `${value} bytes`;
-    }
-
-    function renderTasks(tasks) {
-      const body = document.getElementById('tasksTable');
-      body.innerHTML = '';
-      if (!Array.isArray(tasks) || tasks.length === 0) {
-        body.innerHTML = '<tr><td colspan="4">n/d</td></tr>';
-        return;
-      }
-      tasks.forEach((task) => {
-        const row = document.createElement('tr');
-        row.innerHTML = `<td>${task.name}</td><td>${task.core}</td><td>${task.status}</td><td>${task.stackHighWatermark}</td>`;
-        body.appendChild(row);
-      });
-    }
-
-    function renderTimings(timings) {
-      const body = document.getElementById('timingsTable');
-      body.innerHTML = '';
-      if (!Array.isArray(timings) || timings.length === 0) {
-        body.innerHTML = '<tr><td colspan="3">n/d</td></tr>';
-        return;
-      }
-      timings.forEach((timing) => {
-        const row = document.createElement('tr');
-        row.innerHTML = `<td>${timing.name}</td><td>${timing.measured ? timing.lastMicros + ' us' : 'n/d'}</td><td>${timing.measured ? 'medida' : 'pendente'}</td>`;
-        body.appendChild(row);
-      });
-    }
-
-    async function refreshStatus() {
-      try {
-        const response = await fetch('/api/status');
-        const data = await response.json();
-        document.getElementById('status').textContent = data.status;
-        document.getElementById('uptime').textContent = `${data.uptimeSeconds}s`;
-        document.getElementById('freeHeap').textContent = formatBytes(data.freeHeap);
-        document.getElementById('minFreeHeap').textContent = formatBytes(data.minFreeHeap);
-        document.getElementById('flashSize').textContent = formatBytes(data.flashSize);
-        document.getElementById('sketchSize').textContent = formatBytes(data.sketchSize);
-        document.getElementById('apSsid').textContent = data.apSsid || 'n/d';
-        document.getElementById('apIp').textContent = data.apIp || 'n/d';
-        renderTasks(data.tasks);
-        renderTimings(data.functionTimings);
-      } catch (error) {
-        document.getElementById('status').textContent = 'erro ao consultar status';
-      }
-    }
-
-    refreshStatus();
-    setInterval(refreshStatus, 5000);
+    const tabs=document.querySelectorAll('button.tab');const sections=document.querySelectorAll('main section');tabs.forEach((tab)=>{tab.addEventListener('click',()=>{const target=tab.dataset.tab;tabs.forEach((item)=>item.classList.toggle('active',item===tab));sections.forEach((section)=>section.classList.toggle('active',section.id===target));});});
+    function formatBytes(value){if(typeof value!=='number'||value<=0){return'n/d';}return `${value} bytes`;}
+    function renderTasks(tasks){const body=document.getElementById('tasksTable');body.innerHTML='';if(!Array.isArray(tasks)||tasks.length===0){body.innerHTML='<tr><td colspan="4">n/d</td></tr>';return;}tasks.forEach((task)=>{const row=document.createElement('tr');row.innerHTML=`<td>${task.name}</td><td>${task.core}</td><td><span class="badge ok">${task.status}</span></td><td>${task.stackHighWatermark}</td>`;body.appendChild(row);});}
+    function renderTimings(timings){const body=document.getElementById('timingsTable');body.innerHTML='';if(!Array.isArray(timings)||timings.length===0){body.innerHTML='<tr><td colspan="3">n/d</td></tr>';return;}timings.forEach((timing)=>{const row=document.createElement('tr');row.innerHTML=`<td>${timing.name}</td><td>${timing.measured?timing.lastMicros+' us':'n/d'}</td><td><span class="badge ${timing.measured?'ok':'planned'}">${timing.measured?'medida':'pendente'}</span></td>`;body.appendChild(row);});}
+    async function refreshStatus(){try{const response=await fetch('/api/status');const data=await response.json();document.getElementById('status').innerHTML='<span class="badge ok">'+data.status+'</span>';document.getElementById('uptime').textContent=`${data.uptimeSeconds}s`;document.getElementById('freeHeap').textContent=formatBytes(data.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(data.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(data.flashSize);document.getElementById('sketchSize').textContent=formatBytes(data.sketchSize);document.getElementById('apSsid').textContent=data.apSsid||'n/d';document.getElementById('apIp').textContent=data.apIp||'n/d';document.getElementById('eventCount').textContent=(data.eventCount??'n/d')+'/'+(data.eventCapacity??'n/d');document.getElementById('eventSummary').textContent=(data.eventCount??'n/d')+' de '+(data.eventCapacity??'n/d');renderTasks(data.tasks);renderTimings(data.functionTimings);}catch(error){document.getElementById('status').textContent='erro ao consultar status';}}
+    refreshStatus();setInterval(refreshStatus,5000);
   </script>
 </body>
 </html>
@@ -570,7 +536,11 @@ String buildStatusJson()
         json += "}";
     }
 
-    json += "],\"status\":\"ok\"";
+    json += "],\"eventCount\":";
+    json += readEventCount();
+    json += ",\"eventCapacity\":";
+    json += EVENT_CAPACITY;
+    json += ",\"status\":\"ok\"";
     json += "}";
 
     return json;
@@ -586,16 +556,54 @@ void handleRoot()
 void handleStatus()
 {
     const uint32_t startMicros = micros();
+    addEvent("INFO", "WEB", "Acesso a API de status", "/api/status");
     const String json = buildStatusJson();
     updateFunctionTiming("buildStatusJson", micros() - startMicros);
     server.send(200, "application/json", json);
 }
 
+void handleEventsApi()
+{
+    addEvent("INFO", "WEB", "Acesso a API de eventos", "/api/events");
+    server.send(200, "application/json", buildEventsJson());
+}
+
 void handleEvidences()
 {
     const uint32_t startMicros = micros();
+    addEvent("INFO", "WEB", "Acesso a pagina de evidencias", "/evidencias");
     server.send(200, "text/html; charset=utf-8", evidencePage());
     updateFunctionTiming("handleEvidences", micros() - startMicros);
+}
+
+void handleLogs()
+{
+    addEvent("INFO", "WEB", "Acesso a pagina de eventos", "/logs");
+    server.send(200, "text/html; charset=utf-8", logsPage());
+}
+
+void redirectToLogs()
+{
+    server.sendHeader("Location", "/logs", true);
+    server.send(303, "text/plain; charset=utf-8", "Evento registrado. Consulte /logs");
+}
+
+void handleDemoInfo()
+{
+    addEvent("INFO", "DEMO", "Evento demonstrativo informativo");
+    redirectToLogs();
+}
+
+void handleDemoWarn()
+{
+    addEvent("WARN", "DEMO", "Alerta demonstrativo de condicao anormal");
+    redirectToLogs();
+}
+
+void handleDemoSecurity()
+{
+    addEvent("SECURITY", "DEMO", "Evento demonstrativo de seguranca");
+    redirectToLogs();
 }
 
 void handleNotFound()
@@ -614,17 +622,26 @@ void setupAccessPoint()
     Serial.println(apStarted ? "sim" : "nao");
     Serial.print("Wi-Fi AP IP: ");
     Serial.println(WiFi.softAPIP());
+
+    addEvent(apStarted ? "INFO" : "ERROR", "WIFI", apStarted ? "Wi-Fi AP iniciado" : "Falha ao iniciar Wi-Fi AP", WiFi.softAPIP().toString().c_str());
 }
 
 void setupWebServer()
 {
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
+    server.on("/api/events", HTTP_GET, handleEventsApi);
     server.on("/evidencias", HTTP_GET, handleEvidences);
+    server.on("/logs", HTTP_GET, handleLogs);
+    server.on("/eventos", HTTP_GET, handleLogs);
+    server.on("/demo/info", HTTP_GET, handleDemoInfo);
+    server.on("/demo/warn", HTTP_GET, handleDemoWarn);
+    server.on("/demo/security", HTTP_GET, handleDemoSecurity);
     server.onNotFound(handleNotFound);
     server.begin();
 
     Serial.println("Servidor web iniciado na porta 80.");
+    addEvent("INFO", "WEB", "Servidor web iniciado", "porta 80");
 }
 
 void taskWebServer(void *parameter)
@@ -679,6 +696,8 @@ void setup()
     Serial.println("Projeto didatico/de laboratorio; nao substitui firewall profissional.");
 
     metricsMutex = xSemaphoreCreateMutex();
+    eventsMutex = xSemaphoreCreateMutex();
+    addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);
     setupAccessPoint();
     setupWebServer();
     refreshMetricsSnapshot();
