@@ -1,39 +1,46 @@
 # ESP32 Mini Firewall Gateway
 
-Projeto acadêmico da disciplina Performance de Sistemas Ciberfísicos.
+Projeto academico da disciplina Performance de Sistemas Ciberfisicos, implementado em ESP32 fisico com PlatformIO, framework Arduino e servidor web embarcado com `WebServer.h` sincrono.
 
-## Objetivo
+## Objetivo academico
 
-Construir um sistema ciberfísico real baseado em ESP32, com interface web embarcada, métricas de performance, logs, configuração dinâmica, persistência, gerenciamento de energia, sensores e atuadores físicos.
+Construir uma base demonstravel para um monitor ciberfisico com foco em performance, seguranca de rede didatica, dashboard local e coleta de evidencias para apresentacao. O sistema e de laboratorio: nao substitui firewall profissional, roteador real, IDS/IPS, WAF, SIEM, pfSense, OPNsense, Mikrotik ou Fortinet.
 
-## Escopo
+## Estado atual
 
-Este é um projeto didático/de laboratório. Não substitui firewall profissional, pfSense, OPNsense, Mikrotik, Fortinet, IDS/IPS, WAF ou SIEM.
+A base atual compila para `esp32dev` e inclui:
 
-## Hardware previsto
+- Wi-Fi em modo AP com SSID `ESP32-Firewall-Lab`;
+- servidor web embarcado na porta 80;
+- dashboard principal em `/` com abas obrigatorias;
+- API de status em `/api/status`;
+- pagina leve de evidencias em `/evidencias`;
+- tasks FreeRTOS para web server, metricas e heartbeat;
+- metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP e tempos de funcoes.
 
-- ESP32
-- INA219
-- DHT22 ou DS18B20
-- Botão físico
-- Relé 5V
-- Cooler 5V
-- Fonte 5V externa
-- Protoboard/jumpers
-- Caixa física
+Ainda estao planejados para fases posteriores: firewall didatico completo, sensores reais, atuadores, logs persistentes, configuracao dinamica, interrupcao de hardware e gerenciamento de energia.
 
-## Requisitos principais
+## Componentes planejados
 
-- Dashboard web embarcado
-- Aba Performance
-- Logs exportáveis
-- Configuração via web
-- Persistência mínima de 24h
-- Mais de uma task
-- Interrupção de hardware
-- Gerenciamento de energia
-- Dois sensores
-- Dois atuadores não LED/buzzer
+- ESP32 com display, se o driver for confirmado;
+- INA219 para corrente, tensao e potencia;
+- DHT22/AM2302 para temperatura e umidade;
+- MQ-2 para gas/fumaca;
+- rele 5V;
+- ventoinha 5V com acionamento adequado, nunca ligada direto no GPIO;
+- buzzer apenas como apoio, nao como atuador principal do TDE;
+- botoes fisicos;
+- fonte 5V externa quando necessario, GND comum, protoboard, jumpers e caixa fisica.
+
+## Bibliotecas e arquitetura
+
+O `platformio.ini` usa apenas o ambiente `esp32dev` com framework Arduino. As bibliotecas usadas nesta base sao as fornecidas pelo core Arduino-ESP32:
+
+- `WiFi.h`;
+- `WebServer.h`;
+- FreeRTOS nativo do Arduino-ESP32.
+
+A arquitetura ainda esta concentrada em `src/main.cpp`, mas preserva separacao logica por funcoes e estruturas para Wi-Fi, web server, metricas, tasks, API e pagina de evidencias. Separar em modulos fisicos sera feito quando o volume de codigo justificar.
 
 ## Como compilar
 
@@ -53,27 +60,33 @@ pio run -t upload
 pio device monitor -b 115200
 ```
 
-## Como acessar a interface web
+## Como acessar o dashboard
 
-1. Ligue o ESP32 com o firmware gravado.
-2. Conecte o computador ou celular na rede Wi-Fi `ESP32-Firewall-Lab`.
-3. Use a senha `esp32lab123`.
-4. Acesse:
+1. Grave o firmware no ESP32.
+2. Conecte o computador ou celular ao Wi-Fi `ESP32-Firewall-Lab`.
+3. Use a senha de laboratorio configurada no firmware.
+4. Acesse `http://192.168.4.1/` no navegador.
 
-```text
-http://192.168.4.1
-```
+Rotas principais:
 
-## Estado atual
+- Dashboard: `http://192.168.4.1/`
+- Evidencias: `http://192.168.4.1/evidencias`
+- API de status: `http://192.168.4.1/api/status`
 
-Fase 2: Wi-Fi AP mínimo, dashboard web base com abas obrigatórias, múltiplas tasks FreeRTOS e métricas iniciais de performance.
+## API de status
 
-Implementado nesta fase:
+A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
 
-- `taskWebServer` para atendimento do `WebServer.h`;
-- `taskMetrics` para atualizar snapshot de uptime, heap, flash/sketch e estado do AP;
-- `taskHeartbeat` para heartbeat serial a cada 5 segundos;
-- proteção do snapshot compartilhado com mutex FreeRTOS;
-- medição inicial com `micros()` para `buildStatusJson` e `handleRoot`.
+- `project_name`;
+- `firmware_version`;
+- `wifi_connected`;
+- `ip`;
+- `uptime_ms`;
+- `free_heap`;
+- `modules`.
 
-Ainda não foram implementados firewall didático, sensores, persistência, logs exportáveis, configuração dinâmica, gerenciamento de energia, ISR e atuadores físicos.
+Campos legados tambem foram mantidos para compatibilidade com o dashboard atual.
+
+## Evidencias
+
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` foi desenhada para ser simples e legivel em prints no Ubuntu.
