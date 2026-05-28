@@ -1,0 +1,32 @@
+flowchart LR
+    U[Usuario / navegador] --> AP[AP ESP32-Firewall-Lab]
+    AP --> WS[WebServer.h sincrono]
+
+    WS --> HTML[Paginas HTML embarcadas]
+    WS --> API[APIs JSON]
+    WS --> FW[Firewall didatico]
+    WS --> IDS[IDS didatico]
+
+    HTML --> DASH[Dashboard / demo / gateway / logs]
+    API --> STATUS[/api/status]
+    API --> EVENTS[/api/events]
+    API --> PERSISTENT[/api/events/persistent]
+
+    FW --> RAM[Buffer de eventos em RAM]
+    IDS --> RAM
+    WS --> RAM
+    RAM --> LOGS[Paginas /logs e /eventos]
+    RAM --> LFS[LittleFS /events.log]
+    LFS --> PERSISTENT
+
+    WS --> GW[Gateway AP+STA didatico]
+    GW --> APINFO[Telemetria do AP]
+    GW --> STA[Upstream Wi-Fi opcional]
+    GW --> NAT[NAT real nao implementado]
+
+    MET[Tasks FreeRTOS de metricas] --> STATUS
+    MET --> ENERGY[INA219 preparado]
+    FUT[Sensores fisicos futuros] -. fase final .-> MET
+    FUT -. DHT22 / MQ-2 .-> MET
+
+    SMOKE[Smoke tester externo] --> AP
