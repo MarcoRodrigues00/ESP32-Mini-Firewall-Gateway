@@ -7,8 +7,8 @@
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.7.0-sprint-ina219";
-constexpr const char *PROJECT_PHASE = "Sprint integracao INA219";
+constexpr const char *PROJECT_VERSION = "0.8.0-sprint-firewall";
+constexpr const char *PROJECT_PHASE = "Sprint firewall didatico";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSPHRASE = "esp32lab123";
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
@@ -18,6 +18,10 @@ constexpr float ENERGY_LOW_VOLTAGE_V = 4.75F;
 constexpr float ENERGY_HIGH_CURRENT_MA = 500.0F;
 constexpr float ENERGY_HIGH_POWER_MW = 2500.0F;
 constexpr unsigned long ENERGY_ALERT_COOLDOWN_MS = 60000UL;
+constexpr unsigned long FIREWALL_FLOOD_WINDOW_MS = 10000UL;
+constexpr uint16_t FIREWALL_FLOOD_THRESHOLD = 20;
+constexpr unsigned long FIREWALL_SECURITY_COOLDOWN_MS = 30000UL;
+constexpr unsigned long WEB_ACCESS_EVENT_COOLDOWN_MS = 5000UL;
 constexpr size_t EVENT_CAPACITY = 40;
 constexpr size_t EVENT_MESSAGE_SIZE = 72;
 constexpr size_t EVENT_VALUE_SIZE = 24;
@@ -28,6 +32,7 @@ WebServer server(80);
 Adafruit_INA219 ina219;
 SemaphoreHandle_t metricsMutex = nullptr;
 SemaphoreHandle_t eventsMutex = nullptr;
+SemaphoreHandle_t firewallMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
 TaskHandle_t metricsTaskHandle = nullptr;
 TaskHandle_t heartbeatTaskHandle = nullptr;
@@ -53,7 +58,7 @@ const ModuleInfo MODULES[] = {
     {"Wi-Fi AP", "ativo"},
     {"WebServer", "ativo"},
     {"Metricas", "ativo"},
-    {"Firewall didatico", "planejado"},
+    {"Firewall didatico", "ativo"},
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
     {"Eventos em memoria", "ativo"},
@@ -81,6 +86,17 @@ struct EnergySnapshot {
     char alertStatus[48];
 };
 
+struct FirewallSnapshot {
+    bool enabled;
+    uint32_t totalRequests;
+    uint32_t securityEvents;
+    char lastClientIp[16];
+    char lastRoute[32];
+    unsigned long lastRequestMs;
+    unsigned long floodWindowMs;
+    uint16_t floodThreshold;
+};
+
 struct MetricsSnapshot {
     unsigned long uptimeSeconds;
     uint32_t freeHeap;
@@ -105,6 +121,7 @@ struct FunctionTiming {
 };
 
 MetricsSnapshot metricsSnapshot = {};
+FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD};
 EventRecord events[EVENT_CAPACITY] = {};
 bool ina219Available = false;
 unsigned long lastLowVoltageAlertMs = 0;
@@ -113,6 +130,11 @@ unsigned long lastHighPowerAlertMs = 0;
 size_t eventStart = 0;
 size_t eventCount = 0;
 uint32_t nextEventId = 1;
+unsigned long firewallWindowStartMs = 0;
+uint16_t firewallWindowRequests = 0;
+unsigned long lastFloodSecurityEventMs = 0;
+unsigned long lastWebAccessEventMs = 0;
+char lastWebAccessEventRoute[32] = "";
 
 unsigned long uptimeSeconds()
 {
@@ -139,6 +161,24 @@ void appendJsonEscaped(String &json, const char *text)
     }
 }
 
+void incrementSecurityEventCount()
+{
+    if (firewallMutex != nullptr && xSemaphoreTake(firewallMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        ++firewallSnapshot.securityEvents;
+        xSemaphoreGive(firewallMutex);
+    }
+}
+
+FirewallSnapshot readFirewallSnapshot()
+{
+    FirewallSnapshot snapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD};
+    if (firewallMutex != nullptr && xSemaphoreTake(firewallMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snapshot = firewallSnapshot;
+        xSemaphoreGive(firewallMutex);
+    }
+    return snapshot;
+}
+
 void addEvent(const char *level, const char *source, const char *message, const char *value = nullptr)
 {
     if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -154,6 +194,10 @@ void addEvent(const char *level, const char *source, const char *message, const 
     copyText(event.message, sizeof(event.message), message);
     event.hasValue = value != nullptr && value[0] != '\0';
     copyText(event.value, sizeof(event.value), event.hasValue ? value : "");
+
+    if (std::strcmp(level, "SECURITY") == 0) {
+        incrementSecurityEventCount();
+    }
 
     if (eventCount < EVENT_CAPACITY) {
         ++eventCount;
@@ -209,6 +253,61 @@ String formattedFloat(float value, uint8_t decimals)
     char buffer[20];
     formatFloat(buffer, sizeof(buffer), value, decimals);
     return String(buffer);
+}
+
+void registerHttpAccess(const char *route, bool logAccessEvent = true)
+{
+    char clientIp[16];
+    copyText(clientIp, sizeof(clientIp), server.client().remoteIP().toString().c_str());
+
+    bool shouldLogAccess = false;
+    bool shouldLogFlood = false;
+    const unsigned long now = millis();
+
+    if (firewallMutex != nullptr && xSemaphoreTake(firewallMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        firewallSnapshot.enabled = true;
+        ++firewallSnapshot.totalRequests;
+        firewallSnapshot.lastRequestMs = now;
+        firewallSnapshot.floodWindowMs = FIREWALL_FLOOD_WINDOW_MS;
+        firewallSnapshot.floodThreshold = FIREWALL_FLOOD_THRESHOLD;
+        copyText(firewallSnapshot.lastClientIp, sizeof(firewallSnapshot.lastClientIp), clientIp);
+        copyText(firewallSnapshot.lastRoute, sizeof(firewallSnapshot.lastRoute), route);
+
+        if (firewallWindowStartMs == 0 || now - firewallWindowStartMs > FIREWALL_FLOOD_WINDOW_MS) {
+            firewallWindowStartMs = now;
+            firewallWindowRequests = 1;
+        } else if (firewallWindowRequests < UINT16_MAX) {
+            ++firewallWindowRequests;
+        }
+
+        if (firewallWindowRequests > FIREWALL_FLOOD_THRESHOLD &&
+            (lastFloodSecurityEventMs == 0 || now - lastFloodSecurityEventMs >= FIREWALL_SECURITY_COOLDOWN_MS)) {
+            shouldLogFlood = true;
+            lastFloodSecurityEventMs = now;
+        }
+
+        if (logAccessEvent &&
+            (lastWebAccessEventMs == 0 || now - lastWebAccessEventMs >= WEB_ACCESS_EVENT_COOLDOWN_MS ||
+             std::strcmp(lastWebAccessEventRoute, route) != 0)) {
+            shouldLogAccess = true;
+            lastWebAccessEventMs = now;
+            copyText(lastWebAccessEventRoute, sizeof(lastWebAccessEventRoute), route);
+        }
+
+        xSemaphoreGive(firewallMutex);
+    }
+
+    if (shouldLogAccess) {
+        addEvent("INFO", "WEB", "Acesso HTTP ao painel", route);
+    }
+    if (shouldLogFlood) {
+        addEvent("SECURITY", "FIREWALL", "Possivel flood HTTP detectado", route);
+    }
+}
+
+void addSecurityDemoEvent(const char *message, const char *value = nullptr)
+{
+    addEvent("SECURITY", "DEMO", message, value);
 }
 
 void maybeAddEnergyAlert(bool condition, unsigned long &lastAlertMs, const char *message, float value, const char *unit)
@@ -466,6 +565,14 @@ String evidencePage()
     html += F("/");
     html += EVENT_CAPACITY;
     html += F("</span></div></div></div>");
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    html += F("<div class=\"panel\"><h2>Seguranca de rede</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Firewall didatico</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span>");
+    html += firewall.totalRequests;
+    html += F("</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span>");
+    html += firewall.securityEvents;
+    html += F("</span></div><div class=\"metric\"><strong>Ultima rota</strong><span>");
+    html += firewall.lastRoute;
+    html += F("</span></div></div><p class=\"note\">Deteccao didatica baseada em acessos HTTP ao painel; nao substitui firewall profissional.</p></div>");
     html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid summary\"><div class=\"metric\"><strong>INA219</strong><span><span class=\"badge ");
     html += snapshot.energy.available ? "ok" : "planned";
     html += F("\">");
@@ -524,13 +631,14 @@ String htmlPage()
     appendHeader(html, PROJECT_NAME, "Monitor ciberfisico didatico em ESP32 para TDE academico.");
     html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Metricas do sistema</h2><div class=\"grid\"><div class=\"metric\"><strong>Heap livre</strong><span id=\"freeHeap\">n/d</span></div><div class=\"metric\"><strong>Heap minimo</strong><span id=\"minFreeHeap\">n/d</span></div><div class=\"metric\"><strong>Flash</strong><span id=\"flashSize\">n/d</span></div><div class=\"metric\"><strong>Sketch</strong><span id=\"sketchSize\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid\"><div class=\"metric\"><strong>INA219</strong><span id=\"energyStatus\">n/d</span></div><div class=\"metric\"><strong>Tensao</strong><span id=\"energyVoltage\">n/d</span></div><div class=\"metric\"><strong>Corrente</strong><span id=\"energyCurrent\">n/d</span></div><div class=\"metric\"><strong>Potencia</strong><span id=\"energyPower\">n/d</span></div><div class=\"metric\"><strong>Ultimo update</strong><span id=\"energyUpdated\">n/d</span></div><div class=\"metric\"><strong>Alertas</strong><span id=\"energyAlert\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Modulos</h2><div class=\"table-wrap\"><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody id=\"modulesTable\"><tr><td colspan=\"2\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Tasks FreeRTOS</h2><div class=\"table-wrap\"><table><thead><tr><th>Nome</th><th>Core</th><th>Status</th><th>Stack</th></tr></thead><tbody id=\"tasksTable\"><tr><td colspan=\"4\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"panel\"><h2>Tempos de execucao</h2><div class=\"table-wrap\"><table><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id=\"timingsTable\"><tr><td colspan=\"3\">n/d</td></tr></tbody></table></div></div></div>");
     html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>.</p></div>");
-    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
+    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
     html += F("</main></body></html>");
     return html;
 }
@@ -629,6 +737,25 @@ String buildStatusJson()
     json += ",\"alert_status\":\"";
     appendJsonEscaped(json, snapshot.energy.alertStatus);
     json += "\"}";
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    json += ",\"firewall\":{";
+    json += "\"enabled\":";
+    json += firewall.enabled ? "true" : "false";
+    json += ",\"total_requests\":";
+    json += firewall.totalRequests;
+    json += ",\"security_events\":";
+    json += firewall.securityEvents;
+    json += ",\"last_client_ip\":\"";
+    appendJsonEscaped(json, firewall.lastClientIp);
+    json += "\",\"last_route\":\"";
+    appendJsonEscaped(json, firewall.lastRoute);
+    json += "\",\"last_request_ms\":";
+    json += firewall.lastRequestMs;
+    json += ",\"flood_window_ms\":";
+    json += firewall.floodWindowMs;
+    json += ",\"flood_threshold\":";
+    json += firewall.floodThreshold;
+    json += "}";
     json += ",\"eventCount\":";
     json += readEventCount();
     json += ",\"eventCapacity\":";
@@ -642,6 +769,7 @@ String buildStatusJson()
 void handleRoot()
 {
     const uint32_t startMicros = micros();
+    registerHttpAccess("/");
     server.send(200, "text/html; charset=utf-8", htmlPage());
     updateFunctionTiming("handleRoot", micros() - startMicros);
 }
@@ -649,7 +777,7 @@ void handleRoot()
 void handleStatus()
 {
     const uint32_t startMicros = micros();
-    addEvent("INFO", "WEB", "Acesso a API de status", "/api/status");
+    registerHttpAccess("/api/status");
     const String json = buildStatusJson();
     updateFunctionTiming("buildStatusJson", micros() - startMicros);
     server.send(200, "application/json", json);
@@ -657,21 +785,21 @@ void handleStatus()
 
 void handleEventsApi()
 {
-    addEvent("INFO", "WEB", "Acesso a API de eventos", "/api/events");
+    registerHttpAccess("/api/events");
     server.send(200, "application/json", buildEventsJson());
 }
 
 void handleEvidences()
 {
     const uint32_t startMicros = micros();
-    addEvent("INFO", "WEB", "Acesso a pagina de evidencias", "/evidencias");
+    registerHttpAccess("/evidencias");
     server.send(200, "text/html; charset=utf-8", evidencePage());
     updateFunctionTiming("handleEvidences", micros() - startMicros);
 }
 
 void handleLogs()
 {
-    addEvent("INFO", "WEB", "Acesso a pagina de eventos", "/logs");
+    registerHttpAccess(server.uri().c_str());
     server.send(200, "text/html; charset=utf-8", logsPage());
 }
 
@@ -683,24 +811,35 @@ void redirectToLogs()
 
 void handleDemoInfo()
 {
+    registerHttpAccess("/demo/info");
     addEvent("INFO", "DEMO", "Evento demonstrativo informativo");
     redirectToLogs();
 }
 
 void handleDemoWarn()
 {
+    registerHttpAccess("/demo/warn");
     addEvent("WARN", "DEMO", "Alerta demonstrativo de condicao anormal");
     redirectToLogs();
 }
 
 void handleDemoSecurity()
 {
-    addEvent("SECURITY", "DEMO", "Evento demonstrativo de seguranca");
+    registerHttpAccess("/demo/security");
+    addSecurityDemoEvent("Evento demonstrativo de seguranca");
+    redirectToLogs();
+}
+
+void handleDemoFlood()
+{
+    registerHttpAccess("/demo/flood");
+    addSecurityDemoEvent("Simulacao controlada de excesso de requisicoes", "flood didatico");
     redirectToLogs();
 }
 
 void handleNotFound()
 {
+    registerHttpAccess("404", false);
     server.send(404, "text/plain; charset=utf-8", "Rota nao encontrada");
 }
 
@@ -742,6 +881,7 @@ void setupWebServer()
     server.on("/demo/info", HTTP_GET, handleDemoInfo);
     server.on("/demo/warn", HTTP_GET, handleDemoWarn);
     server.on("/demo/security", HTTP_GET, handleDemoSecurity);
+    server.on("/demo/flood", HTTP_GET, handleDemoFlood);
     server.onNotFound(handleNotFound);
     server.begin();
 
@@ -802,6 +942,7 @@ void setup()
 
     metricsMutex = xSemaphoreCreateMutex();
     eventsMutex = xSemaphoreCreateMutex();
+    firewallMutex = xSemaphoreCreateMutex();
     addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);
     setupEnergySensor();
     setupAccessPoint();

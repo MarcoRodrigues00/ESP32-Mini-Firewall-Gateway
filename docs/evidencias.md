@@ -71,9 +71,33 @@ Endereco:
 http://192.168.4.1/api/status
 ```
 
-Registrar o JSON retornado ou salvar em arquivo de evidencias. O retorno deve incluir `project_name`, `firmware_version`, `wifi_connected`, `ip`, `uptime_ms`, `free_heap`, `modules` e `energy`.
+Registrar o JSON retornado ou salvar em arquivo de evidencias. O retorno deve incluir `project_name`, `firmware_version`, `wifi_connected`, `ip`, `uptime_ms`, `free_heap`, `modules`, `energy` e `firewall`.
 
-## 7. INA219 e energia
+## 7. Firewall didatico
+
+Objetivo: comprovar a camada didatica de seguranca baseada nos acessos HTTP ao painel.
+
+Verificar em `/` e `/evidencias`:
+
+- firewall didatico ativo;
+- total de requisicoes HTTP;
+- eventos `SECURITY`;
+- ultima rota acessada;
+- ultimo IP cliente, quando disponivel;
+- regra de flood: mais de 20 requisicoes em 10 segundos.
+
+Rotas de teste controlado:
+
+```text
+http://192.168.4.1/demo/security
+http://192.168.4.1/demo/flood
+```
+
+A rota `/demo/flood` registra uma simulacao controlada de excesso de requisicoes. Nao executar ataque real para a apresentacao; a demonstracao deve usar a rota demo e, se necessario, acessos normais ao painel.
+
+Limite: esta camada nao e firewall profissional, nao inspeciona HTTPS, nao faz NAT e nao substitui IDS/IPS, WAF, SIEM ou roteador real.
+
+## 8. INA219 e energia
 
 Objetivo: comprovar metricas reais de tensao, corrente e potencia quando o sensor estiver conectado.
 
@@ -94,7 +118,7 @@ Prints recomendados:
 
 Se o sensor estiver desconectado, registrar print mostrando Energia `indisponivel` e evento `INA219 nao detectado`. Esse estado e esperado em teste sem hardware e nao deve travar o firmware. Os thresholds de tensao baixa, corrente alta e potencia alta sao didaticos nesta fase.
 
-## 8. Logs e eventos em memoria
+## 9. Logs e eventos em memoria
 
 Objetivo: comprovar o buffer circular de eventos em RAM.
 
@@ -110,7 +134,7 @@ Print recomendado: pagina `/logs` em tabela compacta mostrando quantidade/capaci
 
 Registrar tambem o JSON de `/api/events`, que deve incluir `count`, `capacity` e a lista `events`.
 
-## 9. Eventos demo para apresentacao
+## 10. Eventos demo para apresentacao
 
 Objetivo: demonstrar os niveis INFO, WARN e SECURITY de forma controlada, sem depender de falha real.
 
@@ -120,26 +144,27 @@ Rotas:
 http://192.168.4.1/demo/info
 http://192.168.4.1/demo/warn
 http://192.168.4.1/demo/security
+http://192.168.4.1/demo/flood
 ```
 
 Passos:
 
 1. Abrir `/logs`.
-2. Acionar as tres rotas demo.
-3. Voltar para `/logs` e tirar print dos eventos gerados.
+2. Acionar as rotas demo, incluindo `/demo/flood`.
+3. Voltar para `/logs` e tirar print dos eventos gerados, com destaque para `SECURITY`.
 4. Abrir `/evidencias` e tirar print dos ultimos 5 eventos reais.
 
 Observacao: os eventos demo sao simulacoes controladas para apresentacao. Eles nao indicam falha real de sensor, atuador ou ataque real; servem apenas para demonstrar a classificacao visual INFO, WARN e SECURITY.
 
-## 10. Limitacoes registradas
+## 11. Limitacoes registradas
 
 Os eventos desta fase ficam somente em RAM e sao perdidos ao reiniciar o ESP32. Logs persistentes em LittleFS e exportacao completa serao tratados em fase posterior.
 
 
-## 11. Prints recomendados
+## 12. Prints recomendados
 
-- Dashboard `/` com blocos Resumo, Metricas do sistema e Energia.
+- Dashboard `/` com blocos Resumo, Firewall didatico, Metricas do sistema e Energia.
 - Pagina `/evidencias` como relatorio de execucao com resumo do INA219.
 - Pagina `/logs` com tabela de eventos e badges INFO/WARN/SECURITY.
-- JSON de `/api/status` com objeto `energy`.
+- JSON de `/api/status` com objetos `firewall` e `energy`.
 - JSON de `/api/events` para evidenciar eventos do sensor e eventos demo.

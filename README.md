@@ -19,12 +19,14 @@ A base atual compila para `esp32dev` e inclui:
 - API de eventos em `/api/events`;
 - pagina de eventos em `/logs` e alias `/eventos`;
 - rotas demo controladas para gerar eventos de apresentacao;
+- firewall didatico sobre acessos HTTP ao painel;
+- deteccao didatica de flood por janela de requisicoes;
 - leitura do INA219 para tensao, corrente e potencia;
 - alertas didaticos de tensao baixa, corrente alta e potencia alta;
 - tasks FreeRTOS para web server, metricas e heartbeat;
 - metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP, energia e tempos de funcoes.
 
-Ainda estao planejados para fases posteriores: firewall didatico completo, sensores adicionais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia mais completo.
+Ainda estao planejados para fases posteriores: sensores adicionais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia mais completo. O firewall atual e didatico e limitado aos acessos HTTP ao painel.
 
 ## Componentes planejados
 
@@ -85,6 +87,7 @@ Rotas principais:
 - Demo INFO: `http://192.168.4.1/demo/info`
 - Demo WARN: `http://192.168.4.1/demo/warn`
 - Demo SECURITY: `http://192.168.4.1/demo/security`
+- Demo flood: `http://192.168.4.1/demo/flood`
 
 ## API de status
 
@@ -98,7 +101,22 @@ A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
 - `free_heap`;
 - `modules`.
 
-Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity` e o objeto `energy` com `available`, `bus_voltage_v`, `shunt_voltage_mv`, `current_ma`, `power_mw`, `last_update_ms` e `alert_status`.
+Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity`, o objeto `energy` e o objeto `firewall` com `enabled`, `total_requests`, `security_events`, `last_client_ip`, `last_route`, `last_request_ms`, `flood_window_ms` e `flood_threshold`.
+
+## Firewall didatico
+
+O firewall desta fase e uma camada didatica baseada nos acessos HTTP ao painel embarcado. Ele nao inspeciona trafego HTTPS, nao faz NAT, nao substitui roteador real e nao substitui pfSense, OPNsense, Mikrotik, Fortinet, IDS/IPS ou WAF.
+
+Metricas expostas no dashboard e em `/api/status`:
+
+- total de requisicoes HTTP desde o boot;
+- total de eventos `SECURITY`;
+- ultimo IP cliente visto;
+- ultima rota acessada;
+- `millis` da ultima requisicao;
+- regra de flood configurada.
+
+Regra didatica atual: mais de 20 requisicoes em 10 segundos gera evento `SECURITY`, com cooldown para evitar spam no buffer. A rota `/demo/flood` gera uma simulacao controlada de excesso de requisicoes, sem executar ataque real.
 
 ## INA219 e metricas de energia
 
@@ -141,10 +159,11 @@ Eventos automaticos atuais:
 - acesso a `/evidencias`;
 - acesso a `/api/status`;
 - acesso a `/api/events`;
-- acesso a `/logs` ou `/eventos`.
+- acesso a `/logs` ou `/eventos`;
+- eventos `SECURITY` de flood didatico ou simulacao controlada.
 
-As rotas `/demo/info`, `/demo/warn` e `/demo/security` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
+As rotas `/demo/info`, `/demo/warn`, `/demo/security` e `/demo/flood` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
