@@ -189,6 +189,17 @@ Comando basico:
 python3 tools/smoke_test_http.py --base-url http://192.168.4.1
 ```
 
+## Documentacao tecnica da sprint
+
+Documentos de apoio para arquitetura, defesa e escopo:
+
+- [Arquitetura tecnica](docs/arquitetura-tecnica.md)
+- [Roteiro de demo](docs/roteiro-demo.md)
+- [Referencia de API e rotas](docs/api-reference.md)
+- [Decisoes de escopo](docs/decisoes-escopo.md)
+- [Backlog final](docs/backlog-final.md)
+- [Diagrama de arquitetura Mermaid](docs/diagrama-arquitetura.mmd)
+
 ## Evidencias
 
 O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/demo`, `/gateway`, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids`.
@@ -214,3 +225,9 @@ Rotas relacionadas:
 - `/logs/clear-persistent`: limpa o arquivo persistente e registra evento de limpeza manual.
 
 A rota de limpeza e didatica de laboratorio e nao possui autenticacao nesta fase. Nao usar em rede publica.
+
+## Configuracao Wi-Fi upstream
+
+A rota `/wifi` permite configurar a rede Wi-Fi upstream usada pela interface AP+STA didatica. O AP local `ESP32-Firewall-Lab` continua ativo em `192.168.4.1` para recuperacao mesmo se a conexao upstream falhar.
+
+A configuracao salva mostra apenas SSID e indicadores de estado. A senha/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT real continua fora do escopo desta sprint.

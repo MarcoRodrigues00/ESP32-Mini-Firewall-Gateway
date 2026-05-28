@@ -128,3 +128,35 @@ As rotas abaixo sao atendidas pelo `WebServer.h` sincrono embarcado no ESP32. To
 - Tipo de resposta: `text/html` ou redirecionamento.
 - Finalidade: simular uma assinatura de IDS didatico e registrar evento relacionado.
 - Observacao de escopo: IDS baseado no HTTP do painel. Nao inspeciona HTTPS e nao substitui IDS/IPS real.
+
+## `/wifi`
+
+- Metodo: `GET`.
+- Tipo de resposta: `text/html`.
+- Finalidade: configurar e diagnosticar a rede Wi-Fi upstream mantendo o AP local de recuperacao ativo.
+- Observacao de seguranca: exibe SSID e indicadores, mas nunca exibe a senha/passphrase salva. Nao possui autenticacao nesta fase; usar somente em laboratorio.
+
+## `/wifi/save`
+
+- Metodo: `POST`.
+- Tipo de resposta: redirecionamento `303` para `/wifi`.
+- Finalidade: receber SSID e passphrase, validar tamanho, salvar em LittleFS e tentar conexao upstream com timeout controlado.
+- Observacao de seguranca: a passphrase nao e registrada em eventos, Serial, API ou relatorio.
+
+## `/wifi/clear`
+
+- Metodo: `GET` ou `POST`.
+- Tipo de resposta: redirecionamento `303` para `/wifi`.
+- Finalidade: remover a configuracao upstream salva, desconectar a STA e manter o AP local ativo.
+- Observacao: rota didatica sem autenticacao nesta fase.
+
+## `/wifi/reconnect`
+
+- Metodo: `GET`.
+- Tipo de resposta: redirecionamento `303` para `/wifi`.
+- Finalidade: tentar reconectar usando a configuracao upstream salva.
+- Observacao: NAT real continua nao implementado.
+
+## Campos de Wi-Fi em `/api/status`
+
+O objeto `gateway` foi expandido e o alias `wifi_upstream` foi adicionado com campos de estado sem expor a passphrase: `configured`/`sta_configured`, `ssid_present`, `ssid_masked`, `passphrase_present`, `connected`/`sta_connected`, `ip`/`upstream_ip`, `rssi`/`upstream_rssi`, `last_attempt_ms`, `last_status` e `last_error`.

@@ -51,3 +51,11 @@ O firewall da sprint e didatico e limitado aos acessos HTTP do painel. Ele regis
 Ele nao substitui pfSense, OPNsense, Mikrotik, Fortinet, roteador real, IDS/IPS, WAF, SIEM ou solucao profissional. Tambem nao filtra trafego geral de uma rede nem promete protecao contra ataques reais.
 
 Motivo: o objetivo do TDE e demonstrar um sistema ciberfisico real com metricas, interface embarcada, logs, persistencia e conceitos de seguranca de forma honesta e verificavel.
+
+## Configuracao upstream sem NAT real
+
+A configuracao de Wi-Fi upstream foi adicionada para facilitar a demonstracao em bancada e permitir trocar a rede externa sem regravar firmware. A decisao de escopo e manter AP+STA como telemetria e conectividade didatica, sem implementar NAT real nesta sprint.
+
+A configuracao fica em LittleFS (`/wifi.json`) porque o projeto ja inicializa esse filesystem e a necessidade e simples. A passphrase e necessaria localmente para conectar a STA, mas nao e exposta em pagina, API, eventos, Serial ou relatorios do smoke test.
+
+Nao ha autenticacao nessa fase. Por isso, `/wifi`, `/wifi/save`, `/wifi/clear` e `/wifi/reconnect` devem ser usados apenas no AP local de laboratorio. Autenticacao fica para sprint futura se houver tempo e necessidade.

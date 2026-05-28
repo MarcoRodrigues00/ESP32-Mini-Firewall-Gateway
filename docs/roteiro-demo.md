@@ -113,3 +113,20 @@ Pontos obrigatorios:
 - INA219 esta preparado, mas o teste fisico depende da montagem real.
 
 Fala sugerida: "A proposta e academica e de bancada. O valor tecnico esta em mostrar um sistema ciberfisico real com ESP32, interface embarcada, metricas, eventos, persistencia seletiva e demonstracoes controladas, sem prometer comportamento de equipamento profissional."
+
+## Mostrar configuracao Wi-Fi upstream
+
+Abrir `/wifi` depois de mostrar `/gateway`.
+
+Fala sugerida: "Esta tela permite configurar a rede Wi-Fi upstream sem regravar o firmware. Mesmo se a conexao externa falhar, o AP local do ESP32 continua ativo para recuperacao em `192.168.4.1`."
+
+Mostrar:
+
+- se ha SSID salvo;
+- se ha passphrase configurada, sem exibir o valor;
+- status conectado/desconectado;
+- IP e RSSI quando conectado;
+- ultimo erro ou ultima tentativa;
+- botoes para salvar, reconectar e limpar.
+
+Fala sugerida: "A passphrase nao aparece na interface, API, logs ou Serial. Esta tela ainda nao tem autenticacao e por isso e restrita ao laboratorio."

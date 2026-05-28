@@ -159,6 +159,38 @@ def validate_status(results: List[Result], base_url: str, data: Any) -> Dict[str
     return data
 
 
+def validate_wifi_upstream(results: List[Result], base_url: str, data: Any) -> None:
+    url = make_url(base_url, "/api/status")
+    if not isinstance(data, dict):
+        add_result(results, "Schema Wi-Fi upstream", url, False, "JSON nao e objeto")
+        return
+    gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+    upstream = data.get("wifi_upstream") if isinstance(data.get("wifi_upstream"), dict) else gateway
+    checks = {
+        "configured/sta_configured": "configured" in upstream or "sta_configured" in upstream,
+        "ssid_present ou ssid_masked": "ssid_present" in upstream or "ssid_masked" in upstream,
+        "passphrase_present": "passphrase_present" in upstream,
+        "connected/sta_connected": "connected" in upstream or "sta_connected" in upstream,
+        "ip/upstream_ip": "ip" in upstream or "upstream_ip" in upstream,
+        "rssi/upstream_rssi": "rssi" in upstream or "upstream_rssi" in upstream,
+        "last_attempt_ms": "last_attempt_ms" in upstream or "last_connect_attempt_ms" in upstream,
+        "last_status": "last_status" in upstream,
+        "last_error": "last_error" in upstream,
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    forbidden = []
+    for key in upstream.keys():
+        lowered = str(key).lower()
+        if lowered in {"password", "senha"} or lowered == "passphrase":
+            forbidden.append(str(key))
+    add_result(
+        results,
+        "Schema Wi-Fi upstream",
+        url,
+        not missing and not forbidden,
+        "campos ok; sem segredo exposto" if not missing and not forbidden else "faltando: " + ", ".join(missing) + ("; chaves proibidas: " + ", ".join(forbidden) if forbidden else ""),
+    )
+
 def validate_events(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/events") -> None:
     url = make_url(base_url, "/api/events")
     if not isinstance(data, dict):
@@ -254,6 +286,7 @@ def write_report(
     passed = all(result.passed for result in results)
     firewall = status.get("firewall", {}) if isinstance(status.get("firewall"), dict) else {}
     gateway = status.get("gateway", {}) if isinstance(status.get("gateway"), dict) else {}
+    upstream = status.get("wifi_upstream", gateway) if isinstance(status.get("wifi_upstream", gateway), dict) else {}
     storage = storage_summary(status, persistent)
     version = status.get("firmware_version") or status.get("version") or "n/d"
     uptime = status.get("uptime_ms", "n/d")
@@ -291,7 +324,7 @@ def write_report(
             f"- Heap livre: `{free_heap}` bytes",
             f"- Firewall total requests: `{firewall.get('total_requests', 'n/d')}`",
             f"- Gateway mode: `{gateway.get('mode', 'n/d')}`",
-            f"- Gateway upstream: `{gateway.get('upstream_ssid', 'n/d')}` / connected=`{gateway.get('sta_connected', 'n/d')}`",
+            f"- Gateway upstream: configured=`{upstream.get('sta_configured', upstream.get('configured', 'n/d'))}` / connected=`{upstream.get('sta_connected', upstream.get('connected', 'n/d'))}` / ip=`{upstream.get('upstream_ip', upstream.get('ip', 'n/d'))}`",
             f"- Storage available: `{storage['available']}`",
             f"- Persistent log size: `{storage['file_size']}` / `{storage['max_size']}` bytes",
             "",
@@ -308,6 +341,7 @@ def write_report(
             "- INA219 fisico fica para fase final porque depende da solda/montagem.",
             "- Firewall e IDS sao didaticos e baseados em HTTP do painel.",
             "- Gateway AP+STA nao implementa NAT/roteamento real nesta sprint.",
+            "- Smoke test valida /wifi e schema, mas nao automatiza envio de credencial upstream.",
             "",
         ]
     )
@@ -324,6 +358,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/gateway", ("Gateway", "AP", "STA", "IDS")),
+        ("/wifi", ("Wi-Fi upstream", "SSID", "Passphrase", "recuperacao")),
         ("/demo", ("Demo guiada", "roteiro", "TDE")),
     ]
     for path, terms in html_checks:
@@ -331,6 +366,8 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
 
     status = check_json_route(results, base_url, "/api/status")
     status_obj = validate_status(results, base_url, status) if status is not None else {}
+    if status is not None:
+        validate_wifi_upstream(results, base_url, status)
 
     events_before = check_json_route(results, base_url, "/api/events")
     if events_before is not None:

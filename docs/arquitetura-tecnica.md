@@ -100,3 +100,11 @@ Durante desenvolvimento, o smoke test documentado reduz a necessidade de prints 
 A integracao INA219 esta preparada no firmware para leitura de tensao, corrente e potencia via I2C. Se o sensor nao for detectado, o sistema continua operando e registra aviso.
 
 Os sensores fisicos adicionais, como DHT22 e MQ-2, ficam para a fase final porque dependem de montagem, ligacao adequada, eventual solda e teste em bancada. A documentacao e a apresentacao devem deixar claro quando um dado ainda esta indisponivel ou depende de hardware real.
+
+## Configuracao Wi-Fi upstream pelo painel
+
+A sprint adiciona a pagina `/wifi` para salvar, limpar e reconectar a rede Wi-Fi upstream. O ESP32 preserva `WiFi.mode(WIFI_AP_STA)`: o AP local `ESP32-Firewall-Lab` segue como caminho principal de acesso e recuperacao, enquanto a interface STA tenta conectar ao upstream salvo.
+
+A configuracao local usa LittleFS no arquivo `/wifi.json`, reaproveitando a infraestrutura ja inicializada para logs persistentes. A passphrase fica armazenada apenas localmente para permitir a conexao STA e nao e renderizada em HTML, nao entra em `/api/status`, nao aparece em logs e nao e impressa no Serial.
+
+A tentativa de conexao usa timeout curto e controlado. Se o upstream falhar, o dashboard, `/wifi`, `/gateway` e demais rotas continuam acessiveis pelo AP local. NAT real e monitoramento profundo de pacotes permanecem fora do escopo.
