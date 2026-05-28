@@ -164,6 +164,38 @@ Eventos automaticos atuais:
 
 As rotas `/demo/info`, `/demo/warn`, `/demo/security` e `/demo/flood` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
 
+## Smoke test HTTP
+
+O projeto inclui um smoke tester local para validar as principais rotas do ESP32 e gerar relatorio Markdown em `evidencias/`. Consulte [docs/smoke-test.md](docs/smoke-test.md).
+
+Comando basico:
+
+```bash
+python3 tools/smoke_test_http.py --base-url http://192.168.4.1
+```
+
 ## Evidencias
 
 O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
+
+
+## Logs persistentes em LittleFS
+
+O firmware usa LittleFS para persistir apenas eventos relevantes em `/events.log`. O objetivo e manter evidencias importantes apos reboot sem gravar na flash em todo request comum.
+
+Politica de persistencia:
+
+- persistir `WARN`, `ERROR` e `SECURITY`;
+- persistir eventos importantes de `SYSTEM`, `STORAGE`, `SENSOR`, `ENERGY` e flood do `FIREWALL`;
+- nao persistir acessos comuns como `/api/status` e `/api/events`;
+- nao gravar em loop rapido nem em leitura normal de sensor.
+
+Formato: JSON Lines, uma linha por evento, com `persisted_id`, `id`, `uptime_ms`, `level`, `source`, `message` e `value` quando existir. O limite atual e de 16 KB. Ao ultrapassar o limite, a decisao adotada nesta fase e rotacao simples: apagar `/events.log` e iniciar um novo arquivo. Essa escolha prioriza simplicidade e reduz risco de travamento em bancada.
+
+Rotas relacionadas:
+
+- `/api/events`: eventos recentes em RAM;
+- `/api/events/persistent`: linhas persistidas no LittleFS;
+- `/logs/clear-persistent`: limpa o arquivo persistente e registra evento de limpeza manual.
+
+A rota de limpeza e didatica de laboratorio e nao possui autenticacao nesta fase. Nao usar em rede publica.

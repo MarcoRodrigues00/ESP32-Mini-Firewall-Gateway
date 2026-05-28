@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <Adafruit_INA219.h>
+#include <LittleFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <cstdio>
@@ -7,8 +8,8 @@
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.8.0-sprint-firewall";
-constexpr const char *PROJECT_PHASE = "Sprint firewall didatico";
+constexpr const char *PROJECT_VERSION = "0.9.0-sprint-littlefs";
+constexpr const char *PROJECT_PHASE = "Sprint persistencia controlada de logs";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSPHRASE = "esp32lab123";
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
@@ -23,6 +24,8 @@ constexpr uint16_t FIREWALL_FLOOD_THRESHOLD = 20;
 constexpr unsigned long FIREWALL_SECURITY_COOLDOWN_MS = 30000UL;
 constexpr unsigned long WEB_ACCESS_EVENT_COOLDOWN_MS = 5000UL;
 constexpr size_t EVENT_CAPACITY = 40;
+constexpr const char *PERSISTENT_EVENTS_PATH = "/events.log";
+constexpr size_t PERSISTENT_EVENTS_MAX_SIZE = 16 * 1024;
 constexpr size_t EVENT_MESSAGE_SIZE = 72;
 constexpr size_t EVENT_VALUE_SIZE = 24;
 constexpr BaseType_t CORE_WEB = 1;
@@ -62,7 +65,7 @@ const ModuleInfo MODULES[] = {
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
     {"Eventos em memoria", "ativo"},
-    {"Logs persistentes", "planejado"},
+    {"Logs persistentes", "ativo"},
     {"Energia", "planejado"},
 };
 
@@ -124,6 +127,9 @@ MetricsSnapshot metricsSnapshot = {};
 FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD};
 EventRecord events[EVENT_CAPACITY] = {};
 bool ina219Available = false;
+bool littleFsAvailable = false;
+bool persistentLogRotated = false;
+uint32_t nextPersistentEventId = 1;
 unsigned long lastLowVoltageAlertMs = 0;
 unsigned long lastHighCurrentAlertMs = 0;
 unsigned long lastHighPowerAlertMs = 0;
@@ -159,6 +165,102 @@ void appendJsonEscaped(String &json, const char *text)
         }
         json += *cursor;
     }
+}
+
+bool isImportantPersistentEvent(const char *level, const char *source, const char *message)
+{
+    if (std::strcmp(level, "WARN") == 0 || std::strcmp(level, "ERROR") == 0 || std::strcmp(level, "SECURITY") == 0) {
+        return true;
+    }
+
+    if (std::strcmp(source, "SYSTEM") == 0 || std::strcmp(source, "STORAGE") == 0 ||
+        std::strcmp(source, "SENSOR") == 0 || std::strcmp(source, "ENERGY") == 0) {
+        return true;
+    }
+
+    if (std::strcmp(source, "FIREWALL") == 0 && std::strstr(message, "flood") != nullptr) {
+        return true;
+    }
+
+    return false;
+}
+
+size_t persistentLogSize()
+{
+    if (!littleFsAvailable || !LittleFS.exists(PERSISTENT_EVENTS_PATH)) {
+        return 0;
+    }
+
+    File file = LittleFS.open(PERSISTENT_EVENTS_PATH, "r");
+    if (!file) {
+        return 0;
+    }
+    const size_t size = file.size();
+    file.close();
+    return size;
+}
+
+void appendPersistentEventLine(String &line, const EventRecord &event)
+{
+    line += "{\"persisted_id\":";
+    line += nextPersistentEventId++;
+    line += ",\"id\":";
+    line += event.id;
+    line += ",\"uptime_ms\":";
+    line += event.uptimeMs;
+    line += ",\"level\":\"";
+    appendJsonEscaped(line, event.level);
+    line += "\",\"source\":\"";
+    appendJsonEscaped(line, event.source);
+    line += "\",\"message\":\"";
+    appendJsonEscaped(line, event.message);
+    line += "\"";
+    if (event.hasValue) {
+        line += ",\"value\":\"";
+        appendJsonEscaped(line, event.value);
+        line += "\"";
+    }
+    line += "}\n";
+}
+
+void persistEventIfRelevant(const EventRecord &event)
+{
+    if (!littleFsAvailable || !isImportantPersistentEvent(event.level, event.source, event.message)) {
+        return;
+    }
+
+    String line;
+    line.reserve(180);
+    appendPersistentEventLine(line, event);
+
+    const size_t currentSize = persistentLogSize();
+    if (currentSize + line.length() > PERSISTENT_EVENTS_MAX_SIZE) {
+        LittleFS.remove(PERSISTENT_EVENTS_PATH);
+        persistentLogRotated = true;
+    }
+
+    File file = LittleFS.open(PERSISTENT_EVENTS_PATH, "a");
+    if (!file) {
+        return;
+    }
+    file.print(line);
+    file.close();
+}
+
+void appendStorageJson(String &json)
+{
+    json += "{\"available\":";
+    json += littleFsAvailable ? "true" : "false";
+    json += ",\"file_size\":";
+    json += persistentLogSize();
+    json += ",\"max_size\":";
+    json += PERSISTENT_EVENTS_MAX_SIZE;
+    json += ",\"path\":\"";
+    json += PERSISTENT_EVENTS_PATH;
+    json += "\",\"policy\":\"WARN ERROR SECURITY e eventos importantes de sistema firewall sensores e energia\"";
+    json += ",\"rotated\":";
+    json += persistentLogRotated ? "true" : "false";
+    json += "}";
 }
 
 void incrementSecurityEventCount()
@@ -236,6 +338,9 @@ const char *moduleStatus(const ModuleInfo &module)
 {
     if (std::strcmp(module.name, "Energia") == 0) {
         return ina219Available ? "ativo" : "indisponivel";
+    }
+    if (std::strcmp(module.name, "Logs persistentes") == 0) {
+        return littleFsAvailable ? "ativo" : "indisponivel";
     }
     return module.status;
 }
@@ -565,6 +670,15 @@ String evidencePage()
     html += F("/");
     html += EVENT_CAPACITY;
     html += F("</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Persistencia de logs</h2><div class=\"grid summary\"><div class=\"metric\"><strong>LittleFS</strong><span><span class=\"badge ");
+    html += littleFsAvailable ? "ok" : "planned";
+    html += F("\">");
+    html += littleFsAvailable ? "ativo" : "indisponivel";
+    html += F("</span></span></div><div class=\"metric\"><strong>Arquivo</strong><span>");
+    html += persistentLogSize();
+    html += F(" bytes</span></div><div class=\"metric\"><strong>Limite</strong><span>");
+    html += PERSISTENT_EVENTS_MAX_SIZE;
+    html += F(" bytes</span></div><div class=\"metric\"><strong>Politica</strong><span>eventos relevantes</span></div></div><p class=\"note\">Persistem WARN, ERROR, SECURITY e eventos importantes de sistema, firewall, sensores e energia. Acessos comuns de API nao sao gravados em flash.</p><p class=\"note\"><a href=\"/api/events/persistent\">Abrir JSON persistente</a></p></div>");
     const FirewallSnapshot firewall = readFirewallSnapshot();
     html += F("<div class=\"panel\"><h2>Seguranca de rede</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Firewall didatico</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span>");
     html += firewall.totalRequests;
@@ -638,7 +752,7 @@ String htmlPage()
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Tasks FreeRTOS</h2><div class=\"table-wrap\"><table><thead><tr><th>Nome</th><th>Core</th><th>Status</th><th>Stack</th></tr></thead><tbody id=\"tasksTable\"><tr><td colspan=\"4\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"panel\"><h2>Tempos de execucao</h2><div class=\"table-wrap\"><table><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id=\"timingsTable\"><tr><td colspan=\"3\">n/d</td></tr></tbody></table></div></div></div>");
     html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>.</p></div>");
-    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
+    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderStorage(s){s=s||{};document.getElementById('storageStatus').innerHTML=badge(s.available?'ativo':'indisponivel');document.getElementById('storageSize').textContent=formatBytes(s.file_size);document.getElementById('storageMax').textContent=formatBytes(s.max_size);document.getElementById('storagePolicy').textContent=s.policy||'n/d'}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderStorage(d.storage||d.persistence);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
     html += F("</main></body></html>");
     return html;
 }
@@ -647,7 +761,7 @@ String buildStatusJson()
 {
     const MetricsSnapshot snapshot = readMetricsSnapshot();
     String json;
-    json.reserve(1280);
+    json.reserve(1700);
     json += "{";
     json += "\"project_name\":\"";
     json += PROJECT_NAME;
@@ -756,6 +870,10 @@ String buildStatusJson()
     json += ",\"flood_threshold\":";
     json += firewall.floodThreshold;
     json += "}";
+    json += ",\"storage\":";
+    appendStorageJson(json);
+    json += ",\"persistence\":";
+    appendStorageJson(json);
     json += ",\"eventCount\":";
     json += readEventCount();
     json += ",\"eventCapacity\":";
@@ -764,6 +882,69 @@ String buildStatusJson()
     json += "}";
 
     return json;
+}
+
+String buildPersistentEventsJson()
+{
+    String json;
+    json.reserve(PERSISTENT_EVENTS_MAX_SIZE + 220);
+    json += "{\"available\":";
+    json += littleFsAvailable ? "true" : "false";
+    json += ",\"file_size\":";
+    json += persistentLogSize();
+    json += ",\"max_size\":";
+    json += PERSISTENT_EVENTS_MAX_SIZE;
+    json += ",\"path\":\"";
+    json += PERSISTENT_EVENTS_PATH;
+    json += "\",\"policy\":\"WARN ERROR SECURITY e eventos importantes de sistema firewall sensores e energia\"";
+    json += ",\"rotated\":";
+    json += persistentLogRotated ? "true" : "false";
+    json += ",\"lines\":[";
+
+    if (littleFsAvailable && LittleFS.exists(PERSISTENT_EVENTS_PATH)) {
+        File file = LittleFS.open(PERSISTENT_EVENTS_PATH, "r");
+        bool first = true;
+        while (file && file.available()) {
+            String line = file.readStringUntil('\n');
+            line.trim();
+            if (line.length() == 0) {
+                continue;
+            }
+            if (!first) {
+                json += ",";
+            }
+            json += "\"";
+            appendJsonEscaped(json, line.c_str());
+            json += "\"";
+            first = false;
+        }
+        if (file) {
+            file.close();
+        }
+    }
+
+    json += "]}";
+    return json;
+}
+
+void handlePersistentEventsApi()
+{
+    registerHttpAccess("/api/events/persistent", false);
+    server.send(200, "application/json", buildPersistentEventsJson());
+}
+
+void handleClearPersistentLogs()
+{
+    registerHttpAccess("/logs/clear-persistent", false);
+    if (littleFsAvailable) {
+        LittleFS.remove(PERSISTENT_EVENTS_PATH);
+        persistentLogRotated = false;
+        addEvent("WARN", "STORAGE", "Limpeza manual dos logs persistentes", PERSISTENT_EVENTS_PATH);
+    } else {
+        addEvent("ERROR", "STORAGE", "Limpeza solicitada sem LittleFS disponivel", PERSISTENT_EVENTS_PATH);
+    }
+    server.sendHeader("Location", "/logs", true);
+    server.send(303, "text/plain; charset=utf-8", "Logs persistentes limpos. Consulte /logs");
 }
 
 void handleRoot()
@@ -843,6 +1024,17 @@ void handleNotFound()
     server.send(404, "text/plain; charset=utf-8", "Rota nao encontrada");
 }
 
+void setupPersistentStorage()
+{
+    littleFsAvailable = LittleFS.begin(true);
+    if (littleFsAvailable) {
+        addEvent("INFO", "STORAGE", "LittleFS iniciado", PERSISTENT_EVENTS_PATH);
+        return;
+    }
+
+    addEvent("ERROR", "STORAGE", "Falha ao iniciar LittleFS", PERSISTENT_EVENTS_PATH);
+}
+
 void setupEnergySensor()
 {
     ina219Available = ina219.begin();
@@ -875,9 +1067,11 @@ void setupWebServer()
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/events", HTTP_GET, handleEventsApi);
+    server.on("/api/events/persistent", HTTP_GET, handlePersistentEventsApi);
     server.on("/evidencias", HTTP_GET, handleEvidences);
     server.on("/logs", HTTP_GET, handleLogs);
     server.on("/eventos", HTTP_GET, handleLogs);
+    server.on("/logs/clear-persistent", HTTP_GET, handleClearPersistentLogs);
     server.on("/demo/info", HTTP_GET, handleDemoInfo);
     server.on("/demo/warn", HTTP_GET, handleDemoWarn);
     server.on("/demo/security", HTTP_GET, handleDemoSecurity);
@@ -943,6 +1137,7 @@ void setup()
     metricsMutex = xSemaphoreCreateMutex();
     eventsMutex = xSemaphoreCreateMutex();
     firewallMutex = xSemaphoreCreateMutex();
+    setupPersistentStorage();
     addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);
     setupEnergySensor();
     setupAccessPoint();

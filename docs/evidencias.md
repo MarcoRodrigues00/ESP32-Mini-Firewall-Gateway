@@ -168,3 +168,27 @@ Os eventos desta fase ficam somente em RAM e sao perdidos ao reiniciar o ESP32. 
 - Pagina `/logs` com tabela de eventos e badges INFO/WARN/SECURITY.
 - JSON de `/api/status` com objetos `firewall` e `energy`.
 - JSON de `/api/events` para evidenciar eventos do sensor e eventos demo.
+
+
+## 11. Persistencia controlada em LittleFS
+
+Nesta fase, os prints devem confirmar que a persistencia esta disponivel, mas a coleta formal de evidencias completas pode ficar para a etapa final de documentacao.
+
+Itens para verificar em bancada:
+
+- `/logs` mostrando status do LittleFS, tamanho do arquivo e limite.
+- `/evidencias` mostrando LittleFS ativo ou indisponivel e a politica resumida.
+- `/api/status` contendo o objeto `storage` ou `persistence`.
+- `/api/events/persistent` retornando `available`, `file_size`, `max_size`, `path`, `policy`, `rotated` e `lines`.
+- `/logs/clear-persistent` limpando o arquivo e voltando para `/logs`.
+
+Politica registrada:
+
+- eventos em RAM continuam em `/api/events`;
+- eventos persistentes ficam em `/events.log`;
+- somente WARN, ERROR, SECURITY e eventos importantes de sistema, storage, firewall, sensor e energia sao gravados;
+- acessos comuns de API nao sao persistidos para evitar desgaste da flash;
+- limite atual: 16 KB;
+- ao ultrapassar o limite, o arquivo antigo e apagado e um novo arquivo e iniciado.
+
+As rotas demo continuam sendo simulacoes controladas de laboratorio. `/demo/warn`, `/demo/security` e `/demo/flood` devem gerar registros persistentes pela politica atual; `/demo/info` permanece apenas como evento comum em RAM.

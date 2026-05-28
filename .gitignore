@@ -22,9 +22,12 @@ Thumbs.db
 # Temporary
 *.tmp
 *.log
+__pycache__/
+*.pyc
 
 # Evidence raw/temp
 evidencias/raw/
+evidencias/smoke-test-*.md
 
 # Build/export
 dist/

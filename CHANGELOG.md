@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0-sprint-littlefs
+
+- Adicionada inicializacao do LittleFS no boot com continuidade do firmware em caso de falha.
+- Adicionada persistencia seletiva em `/events.log` para WARN, ERROR, SECURITY e eventos importantes de sistema, storage, firewall, sensor e energia.
+- Adicionada rotacao simples por limite de 16 KB, apagando o arquivo antigo quando o limite e ultrapassado.
+- Adicionada rota `/api/events/persistent` com estado do storage e linhas persistidas.
+- Adicionada rota didatica `/logs/clear-persistent` para limpeza manual dos logs persistentes.
+- Atualizadas paginas `/`, `/logs` e `/evidencias` para exibir status da persistencia.
+- Atualizada documentacao sobre eventos em RAM versus eventos persistentes.
+
 ## 0.6.0-sprint-visual
 
 - Aplicada identidade visual de mini SOC ciberfisico com tema escuro, cards, badges de status e hierarquia mais forte.
