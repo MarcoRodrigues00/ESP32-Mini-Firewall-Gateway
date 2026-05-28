@@ -38,6 +38,9 @@ O script valida paginas HTML:
 - `/logs`
 - `/eventos`
 - `/gateway`
+- `/demo`
+
+A pagina `/demo` deve conter os termos `Demo guiada`, `roteiro` e `TDE`, confirmando que o roteiro guiado esta embarcado no firmware.
 
 Valida APIs JSON:
 

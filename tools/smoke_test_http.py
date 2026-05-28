@@ -324,6 +324,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/gateway", ("Gateway", "AP", "STA", "IDS")),
+        ("/demo", ("Demo guiada", "roteiro", "TDE")),
     ]
     for path, terms in html_checks:
         check_html(results, base_url, path, terms)

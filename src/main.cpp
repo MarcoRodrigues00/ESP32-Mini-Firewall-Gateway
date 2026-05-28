@@ -907,6 +907,51 @@ String htmlPage()
     return html;
 }
 
+String demoPage()
+{
+    const MetricsSnapshot snapshot = readMetricsSnapshot();
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    const size_t count = readEventCount();
+    String html;
+    html.reserve(7600);
+    appendPageHead(html, "Demo guiada - ESP32 Mini Firewall Gateway");
+    appendHeader(html, "Demo guiada", "Roteiro de apresentacao do TDE no ESP32 em bancada.");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a><a class=\"btn\" href=\"/api/events/persistent\">/api/events/persistent</a></div>");
+    html += F("<div class=\"panel\"><h2>Status resumido</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Firmware</strong><span>");
+    html += PROJECT_VERSION;
+    html += F("</span></div><div class=\"metric\"><strong>IP AP</strong><span>");
+    html += snapshot.apIp[0] != '\0' ? snapshot.apIp : "n/d";
+    html += F("</span></div><div class=\"metric\"><strong>Gateway</strong><span>");
+    html += gateway.mode;
+    html += F("</span></div><div class=\"metric\"><strong>Upstream</strong><span>");
+    html += gateway.staConfigured ? (gateway.staConnected ? "conectado" : "desconectado") : "nao configurado";
+    html += F("</span></div><div class=\"metric\"><strong>Eventos</strong><span>");
+    html += count;
+    html += F("/");
+    html += EVENT_CAPACITY;
+    html += F("</span></div><div class=\"metric\"><strong>SECURITY</strong><span>");
+    html += firewall.securityEvents;
+    html += F("</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Roteiro em etapas</h2><div class=\"table-wrap\"><table><thead><tr><th>Etapa</th><th>Objetivo</th><th>Acao</th></tr></thead><tbody>");
+    html += F("<tr><td>1</td><td>Verificar status do sistema</td><td><a class=\"btn\" href=\"/\">Abrir dashboard</a></td></tr>");
+    html += F("<tr><td>2</td><td>Verificar Gateway AP+STA</td><td><a class=\"btn\" href=\"/gateway\">Abrir gateway</a></td></tr>");
+    html += F("<tr><td>3</td><td>Gerar evento informativo</td><td><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a></td></tr>");
+    html += F("<tr><td>4</td><td>Gerar alerta WARN</td><td><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a></td></tr>");
+    html += F("<tr><td>5</td><td>Gerar evento SECURITY</td><td><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a></td></tr>");
+    html += F("<tr><td>6</td><td>Simular flood HTTP</td><td><a class=\"btn security\" href=\"/demo/flood\">Simular flood</a></td></tr>");
+    html += F("<tr><td>7</td><td>Simular IDS</td><td><a class=\"btn security\" href=\"/demo/ids\">Simular IDS</a></td></tr>");
+    html += F("<tr><td>8</td><td>Ver logs em RAM</td><td><a class=\"btn\" href=\"/logs\">Abrir logs</a></td></tr>");
+    html += F("<tr><td>9</td><td>Ver logs persistentes</td><td><a class=\"btn\" href=\"/api/events/persistent\">Abrir JSON persistente</a></td></tr>");
+    html += F("<tr><td>10</td><td>Validar com smoke tester externo</td><td><code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code></td></tr>");
+    html += F("</tbody></table></div></div>");
+    html += F("<div class=\"cols\"><div class=\"panel\"><h2>Como apresentar</h2><ul><li>Primeiro mostro o painel local do ESP32.</li><li>Depois mostro o gateway didatico e o AP.</li><li>Em seguida simulo eventos de seguranca.</li><li>Os eventos aparecem em RAM e nos logs persistentes.</li><li>Por fim, executo o smoke test para validar as rotas.</li></ul></div>");
+    html += F("<div class=\"panel\"><h2>Limitacoes</h2><ul><li>NAT/roteamento real nao implementado nesta fase.</li><li>IDS e didatico e baseado em HTTP do painel.</li><li>Nao inspeciona HTTPS.</li><li>Sensores fisicos ficam para fase final.</li><li>INA219 esta preparado no firmware, mas teste fisico depende de montagem/solda.</li></ul></div></div>");
+    html += F("<div class=\"panel tight\"><h2>APIs para demonstracao</h2><p class=\"note\"><a href=\"/api/status\">/api/status</a> mostra metricas, gateway e IDS. <a href=\"/api/events\">/api/events</a> mostra o buffer em RAM. <a href=\"/api/events/persistent\">/api/events/persistent</a> mostra eventos relevantes salvos em LittleFS.</p></div>");
+    html += F("</main></body></html>");
+    return html;
+}
+
 void appendGatewayJson(String &json)
 {
     const GatewaySnapshot gateway = readGatewaySnapshot();
@@ -1240,6 +1285,12 @@ void redirectToLogs()
     server.send(303, "text/plain; charset=utf-8", "Evento registrado. Consulte /logs");
 }
 
+void handleDemoPage()
+{
+    registerHttpAccess("/demo");
+    server.send(200, "text/html; charset=utf-8", demoPage());
+}
+
 void handleDemoInfo()
 {
     registerHttpAccess("/demo/info");
@@ -1363,6 +1414,7 @@ void setupWebServer()
     server.on("/logs", HTTP_GET, handleLogs);
     server.on("/eventos", HTTP_GET, handleLogs);
     server.on("/logs/clear-persistent", HTTP_GET, handleClearPersistentLogs);
+    server.on("/demo", HTTP_GET, handleDemoPage);
     server.on("/demo/info", HTTP_GET, handleDemoInfo);
     server.on("/demo/warn", HTTP_GET, handleDemoWarn);
     server.on("/demo/security", HTTP_GET, handleDemoSecurity);

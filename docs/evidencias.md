@@ -38,7 +38,19 @@ pio device monitor -b 115200
 
 Print recomendado: linhas com nome do projeto, versao, IP do AP, heartbeat e evento de INA219 iniciado ou nao detectado.
 
-## 4. Pagina `/evidencias`
+## 4. Demo guiada
+
+Objetivo: usar uma tela unica como roteiro da apresentacao ao professor.
+
+Endereco:
+
+```text
+http://192.168.4.1/demo
+```
+
+Print recomendado: pagina mostrando status resumido, etapas da demonstracao, botoes para eventos demo, bloco Como apresentar e limitacoes de NAT, IDS, HTTPS e sensores fisicos.
+
+## 5. Pagina `/evidencias`
 
 Objetivo: obter uma tela com aparencia de relatorio academico para anexar na apresentacao.
 
@@ -49,7 +61,7 @@ Passos:
 3. Tirar print mostrando nome do projeto, versao, IP local, Wi-Fi, uptime, heap livre, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais.
 4. Confirmar que o acesso a pagina gerou evento `WEB` para `/evidencias`.
 
-## 5. Dashboard principal
+## 6. Dashboard principal
 
 Objetivo: comprovar a interface web embarcada com abas obrigatorias.
 
@@ -59,9 +71,9 @@ Endereco:
 http://192.168.4.1/
 ```
 
-Print recomendado: painel principal com Resumo, Metricas do sistema, Energia, Modulos, tasks e tempos de execucao.
+Print recomendado: painel principal com Resumo, Gateway, Firewall didatico, Metricas do sistema, Energia, Modulos, tasks e tempos de execucao.
 
-## 6. API de status
+## 7. API de status
 
 Objetivo: comprovar endpoint JSON para coleta tecnica.
 
@@ -71,9 +83,9 @@ Endereco:
 http://192.168.4.1/api/status
 ```
 
-Registrar o JSON retornado ou salvar em arquivo de evidencias. O retorno deve incluir `project_name`, `firmware_version`, `wifi_connected`, `ip`, `uptime_ms`, `free_heap`, `modules`, `energy` e `firewall`.
+Registrar o JSON retornado ou salvar em arquivo de evidencias. O retorno deve incluir `project_name`, `firmware_version`, `wifi_connected`, `ip`, `uptime_ms`, `free_heap`, `modules`, `energy`, `firewall`, `gateway`, `ids` e `storage`/`persistence`.
 
-## 7. Firewall didatico
+## 8. Firewall didatico
 
 Objetivo: comprovar a camada didatica de seguranca baseada nos acessos HTTP ao painel.
 
@@ -103,7 +115,7 @@ A rota `/demo/flood` registra uma simulacao controlada de excesso de requisicoes
 
 Limite: esta camada nao e firewall profissional, nao inspeciona HTTPS, nao implementa NAT/roteamento real nesta sprint e nao substitui IDS/IPS, WAF, SIEM ou roteador real.
 
-## 8. Gateway AP+STA e IDS
+## 9. Gateway AP+STA e IDS
 
 Objetivo: comprovar que o ESP32 mantem o AP local, expoe telemetria de gateway em `/gateway` e registra eventos de IDS didatico.
 
@@ -117,7 +129,7 @@ Prints recomendados:
 
 Registrar como limitacao que NAT/roteamento real nao faz parte desta sprint.
 
-## 9. INA219 e energia
+## 10. INA219 e energia
 
 Objetivo: comprovar metricas reais de tensao, corrente e potencia quando o sensor estiver conectado.
 
@@ -138,7 +150,7 @@ Prints recomendados:
 
 Se o sensor estiver desconectado, registrar print mostrando Energia `indisponivel` e evento `INA219 nao detectado`. Esse estado e esperado em teste sem hardware e nao deve travar o firmware. Os thresholds de tensao baixa, corrente alta e potencia alta sao didaticos nesta fase.
 
-## 10. Logs e eventos em memoria
+## 11. Logs e eventos em memoria
 
 Objetivo: comprovar o buffer circular de eventos em RAM.
 
@@ -154,7 +166,7 @@ Print recomendado: pagina `/logs` em tabela compacta mostrando quantidade/capaci
 
 Registrar tambem o JSON de `/api/events`, que deve incluir `count`, `capacity` e a lista `events`.
 
-## 11. Eventos demo para apresentacao
+## 12. Eventos demo para apresentacao
 
 Objetivo: demonstrar os niveis INFO, WARN e SECURITY de forma controlada, sem depender de falha real.
 
@@ -177,12 +189,12 @@ Passos:
 
 Observacao: os eventos demo sao simulacoes controladas para apresentacao. Eles nao indicam falha real de sensor, atuador ou ataque real; servem apenas para demonstrar a classificacao visual INFO, WARN e SECURITY, incluindo eventos IDS didaticos.
 
-## 12. Limitacoes registradas
+## 13. Limitacoes registradas
 
 Os eventos recentes continuam em buffer circular de RAM e sao perdidos ao reiniciar. Eventos relevantes tambem sao gravados em LittleFS em `/events.log`, com limite atual de 16 KB e rotacao simples. Historico completo de 24 horas ainda depende de teste prolongado e deve ser documentado como pendente/parcial se nao for executado antes da defesa.
 
 
-## 13. Prints recomendados
+## 14. Prints recomendados
 
 - Dashboard `/` com blocos Resumo, Firewall didatico, Metricas do sistema e Energia.
 - Pagina `/evidencias` como relatorio de execucao com resumo do INA219.
@@ -212,4 +224,4 @@ Politica registrada:
 - limite atual: 16 KB;
 - ao ultrapassar o limite, o arquivo antigo e apagado e um novo arquivo e iniciado.
 
-As rotas demo continuam sendo simulacoes controladas de laboratorio. `/demo/warn`, `/demo/security` e `/demo/flood` devem gerar registros persistentes pela politica atual; `/demo/info` permanece apenas como evento comum em RAM.
+As rotas demo continuam sendo simulacoes controladas de laboratorio. `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids` devem gerar registros persistentes pela politica atual; `/demo/info` permanece apenas como evento comum em RAM.

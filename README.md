@@ -83,6 +83,7 @@ Rotas principais:
 - Eventos: `http://192.168.4.1/logs`
 - Alias de eventos: `http://192.168.4.1/eventos`
 - Gateway AP+STA: `http://192.168.4.1/gateway`
+- Demo guiada: `http://192.168.4.1/demo`
 - API de status: `http://192.168.4.1/api/status`
 - API de eventos: `http://192.168.4.1/api/events`
 - Demo INFO: `http://192.168.4.1/demo/info`
@@ -90,6 +91,11 @@ Rotas principais:
 - Demo SECURITY: `http://192.168.4.1/demo/security`
 - Demo flood: `http://192.168.4.1/demo/flood`
 - Demo IDS: `http://192.168.4.1/demo/ids`
+
+
+## Demo guiada
+
+A rota `/demo` centraliza o roteiro de apresentacao do TDE. Ela mostra um resumo do sistema, links rapidos para dashboard, gateway, evidencias, logs e APIs, e uma sequencia de etapas para gerar eventos INFO, WARN, SECURITY, flood didatico e IDS didatico. A pagina tambem lista limitacoes honestas: NAT/roteamento real nao implementado nesta fase, IDS baseado em HTTP do painel, ausencia de inspecao HTTPS e sensores fisicos deixados para fase final.
 
 ## API de status
 
@@ -185,7 +191,7 @@ python3 tools/smoke_test_http.py --base-url http://192.168.4.1
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/gateway`, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids`.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/demo`, `/gateway`, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids`.
 
 
 ## Logs persistentes em LittleFS
