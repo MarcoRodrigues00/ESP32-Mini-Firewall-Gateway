@@ -14,10 +14,10 @@ A base atual compila para `esp32dev` e inclui:
 - servidor web embarcado na porta 80;
 - dashboard principal em `/` com abas obrigatorias;
 - API de status em `/api/status`;
-- pagina de evidencias em `/evidencias`;
+- pagina de evidencias em `/evidencias` com visual de relatorio academico;
 - sistema de eventos em memoria com buffer circular;
 - API de eventos em `/api/events`;
-- pagina de eventos em `/logs` e alias `/eventos`;
+- pagina de eventos em `/logs` e alias `/eventos` com timeline por severidade;
 - rotas demo controladas para gerar eventos de apresentacao;
 - tasks FreeRTOS para web server, metricas e heartbeat;
 - metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP e tempos de funcoes.
@@ -68,7 +68,7 @@ pio device monitor -b 115200
 
 1. Grave o firmware no ESP32.
 2. Conecte o computador ou celular ao Wi-Fi `ESP32-Firewall-Lab`.
-3. Use a senha de laboratorio configurada no firmware.
+3. Use a credencial de laboratorio configurada no firmware.
 4. Acesse `http://192.168.4.1/` no navegador.
 
 Rotas principais:
@@ -121,4 +121,4 @@ As rotas `/demo/info`, `/demo/warn` e `/demo/security` geram eventos simulados e
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` foi atualizada para mostrar versao, IP local, Wi-Fi, uptime, heap livre, status dos modulos, quantidade de eventos registrados e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). O visual atual usa identidade de mini SOC ciberfisico: tema escuro, cards de metricas, badges por status e timeline de eventos. A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.

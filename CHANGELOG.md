@@ -1,12 +1,21 @@
 # Changelog
 
+## 0.6.0-sprint-visual
+
+- Aplicada identidade visual de mini SOC ciberfisico com tema escuro, cards, badges de status e hierarquia mais forte.
+- Melhorado dashboard `/` com hero de sistema, IP AP, uptime, eventos usados/capacidade e cards de metricas.
+- Atualizada pagina `/evidencias` para formato de relatorio de execucao pronto para print academico.
+- Atualizada pagina `/logs` e alias `/eventos` com timeline/cards por severidade, exibindo level, source, message, id, uptime e value.
+- Mantidas APIs `/api/status` e `/api/events` sem remocao de campos legados.
+- Atualizada documentacao de evidencias e prints recomendados.
+
 ## 0.4.0-sprint-evidencias
 
 - Adicionada rota `/evidencias` com nome do projeto, versao do firmware, IP local, status do Wi-Fi, uptime, heap livre, modulos principais e placeholder honesto para eventos.
 - Ampliada rota `/api/status` com os campos `project_name`, `firmware_version`, `wifi_connected`, `ip`, `uptime_ms`, `free_heap` e `modules`.
 - Mantidos campos legados da API para preservar compatibilidade com o dashboard atual.
 - Atualizada documentacao base do README e criado roteiro de evidencias em `docs/evidencias.md`.
-- Mantido escopo sem novas dependencias, sem `AsyncWebServer` e sem leitura simulada de sensores.
+- Mantido escopo sem novas dependencias externas e sem leitura simulada de sensores.
 
 ## 0.3.0-fase2
 

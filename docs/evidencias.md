@@ -40,7 +40,7 @@ Print recomendado: linhas com nome do projeto, versao, IP do AP e heartbeat.
 
 ## 4. Pagina `/evidencias`
 
-Objetivo: obter uma tela simples para anexar na apresentacao.
+Objetivo: obter uma tela com aparencia de relatorio academico para anexar na apresentacao.
 
 Passos:
 
@@ -59,7 +59,7 @@ Endereco:
 http://192.168.4.1/
 ```
 
-Print recomendado: aba Performance com uptime, heap, flash, Wi-Fi AP, tasks e tempos de execucao.
+Print recomendado: topo com identidade de mini SOC ciberfisico, badge de status, IP AP, uptime, eventos e aba Performance com heap, flash, tasks e tempos de execucao.
 
 ## 6. API de status
 
@@ -85,7 +85,7 @@ http://192.168.4.1/eventos
 http://192.168.4.1/api/events
 ```
 
-Print recomendado: pagina `/logs` mostrando quantidade/capacidade, badges por nivel, source, uptime e mensagens recentes.
+Print recomendado: pagina `/logs` em formato de timeline/cards mostrando quantidade/capacidade, badges por nivel, source, id, uptime, mensagem e value quando existir.
 
 Registrar tambem o JSON de `/api/events`, que deve incluir `count`, `capacity` e a lista `events`.
 
@@ -108,8 +108,17 @@ Passos:
 3. Voltar para `/logs` e tirar print dos eventos gerados.
 4. Abrir `/evidencias` e tirar print dos ultimos 5 eventos reais.
 
-Observacao: os eventos demo sao simulacoes controladas para apresentacao. Eles nao indicam falha real de sensor, atuador ou ataque real.
+Observacao: os eventos demo sao simulacoes controladas para apresentacao. Eles nao indicam falha real de sensor, atuador ou ataque real; servem apenas para demonstrar a classificacao visual INFO, WARN e SECURITY.
 
 ## 9. Limitacoes registradas
 
 Os eventos desta fase ficam somente em RAM e sao perdidos ao reiniciar o ESP32. Logs persistentes em LittleFS e exportacao completa serao tratados em fase posterior.
+
+
+## 10. Prints recomendados do visual
+
+- Dashboard `/` com header escuro, status geral, IP AP, uptime e eventos.
+- Aba Performance com cards de heap, flash, sketch, SSID, IP e tabelas de tasks/tempos.
+- Pagina `/evidencias` como relatorio de execucao.
+- Pagina `/logs` com timeline de eventos e badges INFO/WARN/SECURITY.
+- JSON de `/api/status` e `/api/events` para evidenciar os dados consumidos pela interface.
