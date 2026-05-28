@@ -141,8 +141,13 @@ def validate_status(results: List[Result], base_url: str, data: Any) -> Dict[str
         "free_heap": "free_heap" in data,
         "modules": isinstance(data.get("modules"), list),
         "firewall": isinstance(data.get("firewall"), dict),
+        "gateway": isinstance(data.get("gateway"), dict),
         "storage ou persistence": isinstance(data.get("storage"), dict) or isinstance(data.get("persistence"), dict),
     }
+    firewall = data.get("firewall") if isinstance(data.get("firewall"), dict) else {}
+    ids_obj = data.get("ids") if isinstance(data.get("ids"), dict) else {}
+    ids_ok = bool(firewall.get("ids_enabled") is not None or ids_obj.get("enabled") is not None)
+    checks["ids_enabled em firewall ou ids"] = ids_ok
     missing = [name for name, ok in checks.items() if not ok]
     add_result(
         results,
@@ -221,7 +226,7 @@ def flatten_values(value: Any) -> Iterable[str]:
 
 def persistent_mentions_relevant_event(data: Any) -> bool:
     text = "\n".join(flatten_values(data)).upper()
-    return any(term in text for term in ("WARN", "SECURITY", "FLOOD", "SEGURANCA", "EXCESSO"))
+    return any(term in text for term in ("WARN", "SECURITY", "FLOOD", "IDS", "SEGURANCA", "EXCESSO"))
 
 
 def storage_summary(status: Dict[str, Any], persistent: Any) -> Dict[str, Any]:
@@ -248,6 +253,7 @@ def write_report(
     report_path = output_dir / f"smoke-test-{now:%Y%m%d-%H%M%S}.md"
     passed = all(result.passed for result in results)
     firewall = status.get("firewall", {}) if isinstance(status.get("firewall"), dict) else {}
+    gateway = status.get("gateway", {}) if isinstance(status.get("gateway"), dict) else {}
     storage = storage_summary(status, persistent)
     version = status.get("firmware_version") or status.get("version") or "n/d"
     uptime = status.get("uptime_ms", "n/d")
@@ -284,6 +290,8 @@ def write_report(
             f"- Uptime: `{uptime}` ms",
             f"- Heap livre: `{free_heap}` bytes",
             f"- Firewall total requests: `{firewall.get('total_requests', 'n/d')}`",
+            f"- Gateway mode: `{gateway.get('mode', 'n/d')}`",
+            f"- Gateway upstream: `{gateway.get('upstream_ssid', 'n/d')}` / connected=`{gateway.get('sta_connected', 'n/d')}`",
             f"- Storage available: `{storage['available']}`",
             f"- Persistent log size: `{storage['file_size']}` / `{storage['max_size']}` bytes",
             "",
@@ -298,7 +306,8 @@ def write_report(
             "",
             "- Smoke test nao substitui teste fisico dos sensores.",
             "- INA219 fisico fica para fase final porque depende da solda/montagem.",
-            "- Firewall e didatico e baseado em HTTP do painel.",
+            "- Firewall e IDS sao didaticos e baseados em HTTP do painel.",
+            "- Gateway AP+STA nao implementa NAT/roteamento real nesta sprint.",
             "",
         ]
     )
@@ -314,6 +323,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/evidencias", ("Evidencia", "execucao", "Energia", "Seguranca")),
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
+        ("/gateway", ("Gateway", "AP", "STA", "IDS")),
     ]
     for path, terms in html_checks:
         check_html(results, base_url, path, terms)
@@ -329,7 +339,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
     if persistent_before is not None:
         validate_persistent(results, base_url, persistent_before)
 
-    for path in ("/demo/info", "/demo/warn", "/demo/security", "/demo/flood"):
+    for path in ("/demo/info", "/demo/warn", "/demo/security", "/demo/flood", "/demo/ids"):
         trigger_demo(results, base_url, path)
         time.sleep(0.15)
 
@@ -338,7 +348,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         validate_events(results, base_url, events_after, "Schema /api/events apos demos")
         add_result(
             results,
-            "Eventos WARN/SECURITY apos demos",
+            "Eventos WARN/SECURITY/IDS apos demos",
             make_url(base_url, "/api/events"),
             event_level_exists(events_after, ("WARN", "SECURITY")),
             "WARN ou SECURITY encontrado" if event_level_exists(events_after, ("WARN", "SECURITY")) else "WARN/SECURITY nao encontrado",
@@ -352,7 +362,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
             "Persistentes mencionam evento relevante",
             make_url(base_url, "/api/events/persistent"),
             persistent_mentions_relevant_event(persistent_after),
-            "WARN/SECURITY/flood encontrado" if persistent_mentions_relevant_event(persistent_after) else "sem evento relevante detectavel",
+            "WARN/SECURITY/flood/IDS encontrado" if persistent_mentions_relevant_event(persistent_after) else "sem evento relevante detectavel",
         )
 
     check_html(results, base_url, "/logs", ("Registro", "eventos", "SECURITY", "Persistencia"))

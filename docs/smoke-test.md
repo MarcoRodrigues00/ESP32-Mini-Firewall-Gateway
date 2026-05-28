@@ -37,6 +37,7 @@ O script valida paginas HTML:
 - `/evidencias`
 - `/logs`
 - `/eventos`
+- `/gateway`
 
 Valida APIs JSON:
 
@@ -44,7 +45,7 @@ Valida APIs JSON:
 - `/api/events`
 - `/api/events/persistent`
 
-Em `/api/status`, o smoke test espera informacao clara de persistencia em objeto top-level `storage` ou `persistence`. O schema recomendado e:
+Em `/api/status`, o smoke test espera informacao clara de persistencia em objeto top-level `storage` ou `persistence`, objeto `gateway` e campos de IDS em `firewall` ou `ids`. O schema recomendado para persistencia e:
 
 ```json
 {
@@ -58,14 +59,38 @@ Em `/api/status`, o smoke test espera informacao clara de persistencia em objeto
 }
 ```
 
+Schema esperado para gateway/IDS:
+
+```json
+{
+  "gateway": {
+    "mode": "AP_ONLY",
+    "ap_enabled": true,
+    "ap_ssid": "ESP32-Firewall-Lab",
+    "ap_ip": "192.168.4.1",
+    "sta_configured": false,
+    "sta_connected": false,
+    "nat_enabled": false,
+    "nat_note": "experimental/not implemented"
+  },
+  "firewall": {
+    "ids_enabled": true,
+    "ids_events": 0,
+    "suspicious_404_count": 0,
+    "sensitive_path_hits": 0
+  }
+}
+```
+
 Aciona rotas demo controladas:
 
 - `/demo/info`
 - `/demo/warn`
 - `/demo/security`
 - `/demo/flood`
+- `/demo/ids`
 
-Depois das rotas demo, consulta novamente `/api/events`, `/api/events/persistent` e `/logs` para verificar eventos WARN/SECURITY e persistencia.
+Depois das rotas demo, consulta novamente `/api/events`, `/api/events/persistent` e `/logs` para verificar eventos WARN/SECURITY/IDS e persistencia.
 
 ## Relatorio gerado
 
@@ -100,5 +125,6 @@ Depois de gerar eventos e confirmar que `/api/events/persistent` responde:
 
 - O smoke test nao substitui teste fisico dos sensores.
 - O INA219 fisico fica para a fase final porque depende de solda/montagem.
-- O firewall e didatico e baseado em acessos HTTP ao painel.
-- O teste nao executa ataque real; `/demo/flood` e uma simulacao controlada.
+- O firewall e IDS sao didaticos e baseados em acessos HTTP ao painel.
+- O gateway AP+STA nao implementa NAT/roteamento real nesta sprint.
+- O teste nao executa ataque real; `/demo/flood` e `/demo/ids` sao simulacoes controladas.

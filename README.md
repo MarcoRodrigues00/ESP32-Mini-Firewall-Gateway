@@ -82,12 +82,14 @@ Rotas principais:
 - Evidencias: `http://192.168.4.1/evidencias`
 - Eventos: `http://192.168.4.1/logs`
 - Alias de eventos: `http://192.168.4.1/eventos`
+- Gateway AP+STA: `http://192.168.4.1/gateway`
 - API de status: `http://192.168.4.1/api/status`
 - API de eventos: `http://192.168.4.1/api/events`
 - Demo INFO: `http://192.168.4.1/demo/info`
 - Demo WARN: `http://192.168.4.1/demo/warn`
 - Demo SECURITY: `http://192.168.4.1/demo/security`
 - Demo flood: `http://192.168.4.1/demo/flood`
+- Demo IDS: `http://192.168.4.1/demo/ids`
 
 ## API de status
 
@@ -101,7 +103,7 @@ A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
 - `free_heap`;
 - `modules`.
 
-Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity`, o objeto `energy` e o objeto `firewall` com `enabled`, `total_requests`, `security_events`, `last_client_ip`, `last_route`, `last_request_ms`, `flood_window_ms` e `flood_threshold`.
+Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity`, os objetos `energy`, `storage`/`persistence`, `gateway`, `ids` e o objeto `firewall` com `enabled`, `total_requests`, `security_events`, `last_client_ip`, `last_route`, `last_request_ms`, `flood_window_ms`, `flood_threshold`, `ids_enabled`, `ids_events`, `suspicious_404_count` e `sensitive_path_hits`.
 
 ## Firewall didatico
 
@@ -116,7 +118,14 @@ Metricas expostas no dashboard e em `/api/status`:
 - `millis` da ultima requisicao;
 - regra de flood configurada.
 
-Regra didatica atual: mais de 20 requisicoes em 10 segundos gera evento `SECURITY`, com cooldown para evitar spam no buffer. A rota `/demo/flood` gera uma simulacao controlada de excesso de requisicoes, sem executar ataque real.
+Regra didatica atual: mais de 20 requisicoes em 10 segundos gera evento `SECURITY`, com cooldown para evitar spam no buffer. A rota `/demo/flood` gera uma simulacao controlada de excesso de requisicoes, sem executar ataque real. O IDS didatico tambem registra acessos a rotas inexistentes e caminhos sensiveis simulados, como `/admin`, `/login`, `/etc/passwd` e `/wp-admin`. A rota `/demo/ids` gera uma simulacao controlada de assinatura IDS.
+
+
+## Gateway AP+STA e IDS didatico
+
+O firmware usa `WiFi.mode(WIFI_AP_STA)` para manter o AP local `ESP32-Firewall-Lab` em `http://192.168.4.1` e, opcionalmente, tentar conexao a uma rede Wi-Fi upstream configurada por constantes didaticas no firmware. Os placeholders upstream ficam vazios por padrao, portanto o status esperado sem configuracao e `nao configurado`.
+
+A pagina `/gateway` mostra modo Wi-Fi, SSID/IP do AP, status do upstream, RSSI quando conectado, clientes no AP e contadores do IDS didatico. Nesta sprint, NAT e roteamento real nao estao implementados; qualquer mencao a NAT aparece como `experimental/not implemented`. O objetivo e telemetria de bancada e eventos de seguranca, nao compartilhar internet nem atuar como firewall profissional de pacotes.
 
 ## INA219 e metricas de energia
 
@@ -149,7 +158,7 @@ A rota `/api/events` retorna JSON leve sem dados sensiveis, com:
 - `capacity`;
 - `events`.
 
-Cada evento contem `id`, `uptime_ms`, `level`, `source`, `message` e, quando aplicavel, `value`. O buffer e circular, fica somente em RAM e guarda os ultimos 40 eventos. Ao reiniciar a placa, o historico em memoria e perdido; persistencia em LittleFS fica para fase posterior.
+Cada evento contem `id`, `uptime_ms`, `level`, `source`, `message` e, quando aplicavel, `value`. O buffer circular em RAM guarda os ultimos 40 eventos. Eventos relevantes tambem sao persistidos em LittleFS em `/events.log`, enquanto acessos comuns permanecem apenas em RAM para evitar escrita excessiva na flash.
 
 Eventos automaticos atuais:
 
@@ -162,7 +171,7 @@ Eventos automaticos atuais:
 - acesso a `/logs` ou `/eventos`;
 - eventos `SECURITY` de flood didatico ou simulacao controlada.
 
-As rotas `/demo/info`, `/demo/warn`, `/demo/security` e `/demo/flood` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
+As rotas `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
 
 ## Smoke test HTTP
 
@@ -176,7 +185,7 @@ python3 tools/smoke_test_http.py --base-url http://192.168.4.1
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/gateway`, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids`.
 
 
 ## Logs persistentes em LittleFS

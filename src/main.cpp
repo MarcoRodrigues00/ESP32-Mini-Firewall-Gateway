@@ -8,10 +8,13 @@
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.9.0-sprint-littlefs";
-constexpr const char *PROJECT_PHASE = "Sprint persistencia controlada de logs";
+constexpr const char *PROJECT_VERSION = "0.10.0-sprint-gateway-ids";
+constexpr const char *PROJECT_PHASE = "Sprint gateway AP+STA e IDS didatico";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSPHRASE = "esp32lab123";
+constexpr const char *UPSTREAM_WIFI_SSID = "";
+constexpr const char *UPSTREAM_WIFI_PASSPHRASE = "";
+constexpr unsigned long UPSTREAM_CONNECT_TIMEOUT_MS = 3000UL;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
 constexpr uint32_t WEB_SERVER_INTERVAL_MS = 10UL;
 constexpr uint32_t METRICS_INTERVAL_MS = 1000UL;
@@ -23,6 +26,8 @@ constexpr unsigned long FIREWALL_FLOOD_WINDOW_MS = 10000UL;
 constexpr uint16_t FIREWALL_FLOOD_THRESHOLD = 20;
 constexpr unsigned long FIREWALL_SECURITY_COOLDOWN_MS = 30000UL;
 constexpr unsigned long WEB_ACCESS_EVENT_COOLDOWN_MS = 5000UL;
+constexpr unsigned long IDS_EVENT_COOLDOWN_MS = 30000UL;
+constexpr unsigned long IDS_404_EVENT_COOLDOWN_MS = 30000UL;
 constexpr size_t EVENT_CAPACITY = 40;
 constexpr const char *PERSISTENT_EVENTS_PATH = "/events.log";
 constexpr size_t PERSISTENT_EVENTS_MAX_SIZE = 16 * 1024;
@@ -36,6 +41,7 @@ Adafruit_INA219 ina219;
 SemaphoreHandle_t metricsMutex = nullptr;
 SemaphoreHandle_t eventsMutex = nullptr;
 SemaphoreHandle_t firewallMutex = nullptr;
+SemaphoreHandle_t gatewayMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
 TaskHandle_t metricsTaskHandle = nullptr;
 TaskHandle_t heartbeatTaskHandle = nullptr;
@@ -62,6 +68,8 @@ const ModuleInfo MODULES[] = {
     {"WebServer", "ativo"},
     {"Metricas", "ativo"},
     {"Firewall didatico", "ativo"},
+    {"Gateway AP+STA", "ativo"},
+    {"IDS didatico", "ativo"},
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
     {"Eventos em memoria", "ativo"},
@@ -98,6 +106,26 @@ struct FirewallSnapshot {
     unsigned long lastRequestMs;
     unsigned long floodWindowMs;
     uint16_t floodThreshold;
+    bool idsEnabled;
+    uint32_t idsEvents;
+    uint32_t suspicious404Count;
+    uint32_t sensitivePathHits;
+};
+
+struct GatewaySnapshot {
+    bool apEnabled;
+    char apSsid[33];
+    char apIp[16];
+    bool staConfigured;
+    bool staConnected;
+    char upstreamSsid[33];
+    char upstreamIp[16];
+    int32_t upstreamRssi;
+    unsigned long lastConnectAttemptMs;
+    unsigned long lastStatusChangeMs;
+    uint8_t clientCount;
+    char mode[8];
+    bool natEnabled;
 };
 
 struct MetricsSnapshot {
@@ -124,7 +152,8 @@ struct FunctionTiming {
 };
 
 MetricsSnapshot metricsSnapshot = {};
-FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD};
+FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD, true, 0, 0, 0};
+GatewaySnapshot gatewaySnapshot = {true, "ESP32-Firewall-Lab", "0.0.0.0", false, false, "nao configurado", "0.0.0.0", 0, 0, 0, 0, "AP_ONLY", false};
 EventRecord events[EVENT_CAPACITY] = {};
 bool ina219Available = false;
 bool littleFsAvailable = false;
@@ -140,6 +169,10 @@ unsigned long firewallWindowStartMs = 0;
 uint16_t firewallWindowRequests = 0;
 unsigned long lastFloodSecurityEventMs = 0;
 unsigned long lastWebAccessEventMs = 0;
+unsigned long lastIdsSecurityEventMs = 0;
+unsigned long lastIds404EventMs = 0;
+bool lastStaConnected = false;
+uint8_t lastGatewayClientCount = 255;
 char lastWebAccessEventRoute[32] = "";
 
 unsigned long uptimeSeconds()
@@ -156,6 +189,8 @@ void copyText(char *target, size_t targetSize, const char *source)
     std::strncpy(target, source, targetSize - 1);
     target[targetSize - 1] = '\0';
 }
+
+void addEvent(const char *level, const char *source, const char *message, const char *value);
 
 void appendJsonEscaped(String &json, const char *text)
 {
@@ -273,12 +308,84 @@ void incrementSecurityEventCount()
 
 FirewallSnapshot readFirewallSnapshot()
 {
-    FirewallSnapshot snapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD};
+    FirewallSnapshot snapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD, true, 0, 0, 0};
     if (firewallMutex != nullptr && xSemaphoreTake(firewallMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         snapshot = firewallSnapshot;
         xSemaphoreGive(firewallMutex);
     }
     return snapshot;
+}
+
+GatewaySnapshot readGatewaySnapshot()
+{
+    GatewaySnapshot snapshot = {true, "ESP32-Firewall-Lab", "0.0.0.0", false, false, "nao configurado", "0.0.0.0", 0, 0, 0, 0, "AP_ONLY", false};
+    if (gatewayMutex != nullptr && xSemaphoreTake(gatewayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snapshot = gatewaySnapshot;
+        xSemaphoreGive(gatewayMutex);
+    }
+    return snapshot;
+}
+
+bool upstreamWifiConfigured()
+{
+    return UPSTREAM_WIFI_SSID[0] != '\0' && std::strcmp(UPSTREAM_WIFI_SSID, "CHANGE_ME") != 0 &&
+           std::strcmp(UPSTREAM_WIFI_SSID, "YOUR_WIFI_SSID") != 0;
+}
+
+void noteIdsFinding(bool securityEvent, bool sensitivePath)
+{
+    if (firewallMutex != nullptr && xSemaphoreTake(firewallMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        firewallSnapshot.idsEnabled = true;
+        if (securityEvent && firewallSnapshot.idsEvents < UINT32_MAX) {
+            ++firewallSnapshot.idsEvents;
+        }
+        if (sensitivePath && firewallSnapshot.sensitivePathHits < UINT32_MAX) {
+            ++firewallSnapshot.sensitivePathHits;
+        } else if (!sensitivePath && firewallSnapshot.suspicious404Count < UINT32_MAX) {
+            ++firewallSnapshot.suspicious404Count;
+        }
+        xSemaphoreGive(firewallMutex);
+    }
+}
+
+void refreshGatewaySnapshot(bool logChanges)
+{
+    const bool configured = upstreamWifiConfigured();
+    const bool connected = configured && WiFi.status() == WL_CONNECTED;
+    const uint8_t clients = WiFi.softAPgetStationNum();
+    const unsigned long now = millis();
+    const bool statusChanged = connected != lastStaConnected;
+    const bool clientChanged = clients != lastGatewayClientCount;
+
+    if (gatewayMutex != nullptr && xSemaphoreTake(gatewayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gatewaySnapshot.apEnabled = true;
+        copyText(gatewaySnapshot.apSsid, sizeof(gatewaySnapshot.apSsid), AP_SSID);
+        copyText(gatewaySnapshot.apIp, sizeof(gatewaySnapshot.apIp), WiFi.softAPIP().toString().c_str());
+        gatewaySnapshot.staConfigured = configured;
+        gatewaySnapshot.staConnected = connected;
+        copyText(gatewaySnapshot.upstreamSsid, sizeof(gatewaySnapshot.upstreamSsid), configured ? UPSTREAM_WIFI_SSID : "nao configurado");
+        copyText(gatewaySnapshot.upstreamIp, sizeof(gatewaySnapshot.upstreamIp), connected ? WiFi.localIP().toString().c_str() : "0.0.0.0");
+        gatewaySnapshot.upstreamRssi = connected ? WiFi.RSSI() : 0;
+        gatewaySnapshot.clientCount = clients;
+        copyText(gatewaySnapshot.mode, sizeof(gatewaySnapshot.mode), configured ? "AP_STA" : "AP_ONLY");
+        gatewaySnapshot.natEnabled = false;
+        if (statusChanged || gatewaySnapshot.lastStatusChangeMs == 0) {
+            gatewaySnapshot.lastStatusChangeMs = now;
+        }
+        xSemaphoreGive(gatewayMutex);
+    }
+
+    if (logChanges && configured && statusChanged) {
+        addEvent(connected ? "INFO" : "WARN", "WIFI", connected ? "Upstream Wi-Fi conectado" : "Upstream Wi-Fi desconectado", connected ? WiFi.localIP().toString().c_str() : UPSTREAM_WIFI_SSID);
+    }
+    if (logChanges && clientChanged && lastGatewayClientCount != 255) {
+        char value[EVENT_VALUE_SIZE];
+        std::snprintf(value, sizeof(value), "%u clientes", clients);
+        addEvent("INFO", "WIFI", "Clientes conectados ao AP", value);
+    }
+
+    lastStaConnected = connected;
+    lastGatewayClientCount = clients;
 }
 
 void addEvent(const char *level, const char *source, const char *message, const char *value = nullptr)
@@ -307,7 +414,9 @@ void addEvent(const char *level, const char *source, const char *message, const 
         eventStart = (eventStart + 1) % EVENT_CAPACITY;
     }
 
+    EventRecord persistedEvent = event;
     xSemaphoreGive(eventsMutex);
+    persistEventIfRelevant(persistedEvent);
 }
 
 size_t readEventCount()
@@ -358,6 +467,43 @@ String formattedFloat(float value, uint8_t decimals)
     char buffer[20];
     formatFloat(buffer, sizeof(buffer), value, decimals);
     return String(buffer);
+}
+
+bool isSensitivePath(const char *route)
+{
+    return std::strstr(route, "/admin") != nullptr || std::strstr(route, "/login") != nullptr ||
+           std::strstr(route, "/wp-admin") != nullptr || std::strstr(route, "/etc/passwd") != nullptr ||
+           std::strstr(route, "/.env") != nullptr || std::strstr(route, "/config") != nullptr;
+}
+
+void addIdsDemoEvent(const char *message, const char *value = nullptr)
+{
+    noteIdsFinding(true, true);
+    addEvent("SECURITY", "IDS", message, value);
+}
+
+void registerIdsNotFound(const char *route)
+{
+    const bool sensitive = isSensitivePath(route);
+    const unsigned long now = millis();
+    bool shouldLog = false;
+    const char *level = sensitive ? "SECURITY" : "WARN";
+    const char *message = sensitive ? "Tentativa de acesso a rota sensivel" : "Rota inexistente acessada";
+
+    if (sensitive) {
+        if (lastIdsSecurityEventMs == 0 || now - lastIdsSecurityEventMs >= IDS_EVENT_COOLDOWN_MS) {
+            shouldLog = true;
+            lastIdsSecurityEventMs = now;
+        }
+    } else if (lastIds404EventMs == 0 || now - lastIds404EventMs >= IDS_404_EVENT_COOLDOWN_MS) {
+        shouldLog = true;
+        lastIds404EventMs = now;
+    }
+
+    noteIdsFinding(sensitive, sensitive);
+    if (shouldLog) {
+        addEvent(level, "IDS", message, route);
+    }
 }
 
 void registerHttpAccess(const char *route, bool logAccessEvent = true)
@@ -442,6 +588,8 @@ MetricsSnapshot readMetricsSnapshot()
 
 void refreshMetricsSnapshot()
 {
+    refreshGatewaySnapshot(true);
+
     EnergySnapshot energy = {};
     energy.available = ina219Available;
     copyText(energy.alertStatus, sizeof(energy.alertStatus), ina219Available ? "normal" : "sensor indisponivel");
@@ -680,6 +828,7 @@ String evidencePage()
     html += PERSISTENT_EVENTS_MAX_SIZE;
     html += F(" bytes</span></div><div class=\"metric\"><strong>Politica</strong><span>eventos relevantes</span></div></div><p class=\"note\">Persistem WARN, ERROR, SECURITY e eventos importantes de sistema, firewall, sensores e energia. Acessos comuns de API nao sao gravados em flash.</p><p class=\"note\"><a href=\"/api/events/persistent\">Abrir JSON persistente</a></p></div>");
     const FirewallSnapshot firewall = readFirewallSnapshot();
+    const GatewaySnapshot gateway = readGatewaySnapshot();
     html += F("<div class=\"panel\"><h2>Seguranca de rede</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Firewall didatico</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span>");
     html += firewall.totalRequests;
     html += F("</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span>");
@@ -725,7 +874,7 @@ String logsPage()
     html.reserve(8200);
     appendPageHead(html, "Registro de eventos - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Registro de eventos", "Eventos em memoria para diagnostico do firmware e demonstracao em bancada.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/api/events\">JSON</a><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/api/events\">JSON</a><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a><a class=\"btn security\" href=\"/demo/flood\">Gerar flood</a><a class=\"btn security\" href=\"/demo/ids\">Gerar IDS</a></div>");
     html += F("<div class=\"panel tight\"><div class=\"grid summary\"><div class=\"metric\"><strong>Eventos em memoria</strong><span>");
     html += count;
     html += F("/");
@@ -743,17 +892,99 @@ String htmlPage()
     html.reserve(9200);
     appendPageHead(html, "ESP32 Mini Firewall Gateway");
     appendHeader(html, PROJECT_NAME, "Monitor ciberfisico didatico em ESP32 para TDE academico.");
-    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
+    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
-    html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span id=\"idsEvents\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Modo</strong><span id=\"gwMode\">n/d</span></div><div class=\"metric\"><strong>Upstream</strong><span id=\"gwUpstream\">n/d</span></div><div class=\"metric\"><strong>AP IP</strong><span id=\"gwApIp\">n/d</span></div><div class=\"metric\"><strong>IP upstream</strong><span id=\"gwUpIp\">n/d</span></div><div class=\"metric\"><strong>Clientes AP</strong><span id=\"gwClients\">n/d</span></div><div class=\"metric\"><strong>Pagina</strong><span><a href=\"/gateway\">/gateway</a></span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Metricas do sistema</h2><div class=\"grid\"><div class=\"metric\"><strong>Heap livre</strong><span id=\"freeHeap\">n/d</span></div><div class=\"metric\"><strong>Heap minimo</strong><span id=\"minFreeHeap\">n/d</span></div><div class=\"metric\"><strong>Flash</strong><span id=\"flashSize\">n/d</span></div><div class=\"metric\"><strong>Sketch</strong><span id=\"sketchSize\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid\"><div class=\"metric\"><strong>INA219</strong><span id=\"energyStatus\">n/d</span></div><div class=\"metric\"><strong>Tensao</strong><span id=\"energyVoltage\">n/d</span></div><div class=\"metric\"><strong>Corrente</strong><span id=\"energyCurrent\">n/d</span></div><div class=\"metric\"><strong>Potencia</strong><span id=\"energyPower\">n/d</span></div><div class=\"metric\"><strong>Ultimo update</strong><span id=\"energyUpdated\">n/d</span></div><div class=\"metric\"><strong>Alertas</strong><span id=\"energyAlert\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Modulos</h2><div class=\"table-wrap\"><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody id=\"modulesTable\"><tr><td colspan=\"2\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Tasks FreeRTOS</h2><div class=\"table-wrap\"><table><thead><tr><th>Nome</th><th>Core</th><th>Status</th><th>Stack</th></tr></thead><tbody id=\"tasksTable\"><tr><td colspan=\"4\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"panel\"><h2>Tempos de execucao</h2><div class=\"table-wrap\"><table><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id=\"timingsTable\"><tr><td colspan=\"3\">n/d</td></tr></tbody></table></div></div></div>");
-    html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>.</p></div>");
-    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderStorage(s){s=s||{};document.getElementById('storageStatus').innerHTML=badge(s.available?'ativo':'indisponivel');document.getElementById('storageSize').textContent=formatBytes(s.file_size);document.getElementById('storageMax').textContent=formatBytes(s.max_size);document.getElementById('storagePolicy').textContent=s.policy||'n/d'}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderStorage(d.storage||d.persistence);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
+    html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>, <a href=\"/demo/flood\">flood</a>, <a href=\"/demo/ids\">IDS</a>.</p></div>");
+    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('idsEvents').textContent=nz(f.ids_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderStorage(s){const el=document.getElementById('storageStatus');if(!el)return;s=s||{};el.innerHTML=badge(s.available?'ativo':'indisponivel');document.getElementById('storageSize').textContent=formatBytes(s.file_size);document.getElementById('storageMax').textContent=formatBytes(s.max_size);document.getElementById('storagePolicy').textContent=s.policy||'n/d'}function renderGateway(g){g=g||{};document.getElementById('gwMode').textContent=g.mode||'n/d';document.getElementById('gwUpstream').innerHTML=badge(g.sta_connected?'conectado':(g.sta_configured?'desconectado':'nao configurado'));document.getElementById('gwApIp').textContent=g.ap_ip||'n/d';document.getElementById('gwUpIp').textContent=g.upstream_ip||'n/d';document.getElementById('gwClients').textContent=nz(g.client_count)}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderGateway(d.gateway);renderStorage(d.storage||d.persistence);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
     html += F("</main></body></html>");
+    return html;
+}
+
+void appendGatewayJson(String &json)
+{
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    json += "{\"mode\":\"";
+    appendJsonEscaped(json, gateway.mode);
+    json += "\",\"ap_enabled\":";
+    json += gateway.apEnabled ? "true" : "false";
+    json += ",\"ap_ssid\":\"";
+    appendJsonEscaped(json, gateway.apSsid);
+    json += "\",\"ap_ip\":\"";
+    appendJsonEscaped(json, gateway.apIp);
+    json += "\",\"sta_configured\":";
+    json += gateway.staConfigured ? "true" : "false";
+    json += ",\"sta_connected\":";
+    json += gateway.staConnected ? "true" : "false";
+    json += ",\"upstream_ssid\":\"";
+    appendJsonEscaped(json, gateway.upstreamSsid);
+    json += "\",\"upstream_ip\":\"";
+    appendJsonEscaped(json, gateway.upstreamIp);
+    json += "\",\"upstream_rssi\":";
+    json += gateway.upstreamRssi;
+    json += ",\"last_connect_attempt_ms\":";
+    json += gateway.lastConnectAttemptMs;
+    json += ",\"last_status_change_ms\":";
+    json += gateway.lastStatusChangeMs;
+    json += ",\"client_count\":";
+    json += gateway.clientCount;
+    json += ",\"nat_enabled\":false,\"nat_note\":\"experimental/not implemented\"}";
+}
+
+String gatewayStatusText(const GatewaySnapshot &gateway)
+{
+    if (!gateway.staConfigured) {
+        return "nao configurado";
+    }
+    return gateway.staConnected ? "conectado" : "desconectado";
+}
+
+String buildGatewayPage()
+{
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    String html;
+    html.reserve(5200);
+    appendPageHead(html, "Gateway - ESP32 Mini Firewall Gateway");
+    appendHeader(html, "Gateway AP+STA", "Telemetria didatica de rede local e upstream Wi-Fi.");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/demo/ids\">Gerar IDS</a></div>");
+    html += F("<div class=\"panel\"><h2>Modo Wi-Fi</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Modo</strong><span>");
+    html += gateway.mode;
+    html += F("</span></div><div class=\"metric\"><strong>AP SSID</strong><span>");
+    html += gateway.apSsid;
+    html += F("</span></div><div class=\"metric\"><strong>AP IP</strong><span>");
+    html += gateway.apIp;
+    html += F("</span></div><div class=\"metric\"><strong>Clientes AP</strong><span>");
+    html += gateway.clientCount;
+    html += F("</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Upstream Wi-Fi</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Configuracao</strong><span><span class=\"badge ");
+    html += gateway.staConfigured ? "ok" : "planned";
+    html += F("\">");
+    html += gateway.staConfigured ? "configurado" : "nao configurado";
+    html += F("</span></span></div><div class=\"metric\"><strong>Status</strong><span>");
+    html += gatewayStatusText(gateway);
+    html += F("</span></div><div class=\"metric\"><strong>SSID upstream</strong><span>");
+    html += gateway.upstreamSsid;
+    html += F("</span></div><div class=\"metric\"><strong>IP upstream</strong><span>");
+    html += gateway.upstreamIp;
+    html += F("</span></div><div class=\"metric\"><strong>RSSI</strong><span>");
+    html += gateway.staConnected ? String(gateway.upstreamRssi) + " dBm" : "n/d";
+    html += F("</span></div><div class=\"metric\"><strong>Ultima tentativa</strong><span>");
+    html += gateway.lastConnectAttemptMs;
+    html += F(" ms</span></div></div><p class=\"note\">NAT/roteamento real nao faz parte desta sprint; a funcao e telemetria AP+STA e demonstracao didatica de IDS.</p></div>");
+    html += F("<div class=\"panel\"><h2>IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += firewall.idsEvents;
+    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += firewall.suspicious404Count;
+    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += firewall.sensitivePathHits;
+    html += F("</span></div></div><p class=\"note\">Deteccao baseada em HTTP do painel: flood, rotas inexistentes e caminhos sensiveis simulados. Nao inspeciona HTTPS e nao substitui IDS/IPS real.</p></div></main></body></html>");
     return html;
 }
 
@@ -768,7 +999,7 @@ String buildStatusJson()
     json += "\",\"firmware_version\":\"";
     json += PROJECT_VERSION;
     json += "\",\"wifi_connected\":";
-    json += WiFi.getMode() == WIFI_AP ? "true" : "false";
+    json += (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) ? "true" : "false";
     json += ",\"ip\":\"";
     json += snapshot.apIp;
     json += "\",\"uptime_ms\":";
@@ -869,7 +1100,26 @@ String buildStatusJson()
     json += firewall.floodWindowMs;
     json += ",\"flood_threshold\":";
     json += firewall.floodThreshold;
+    json += ",\"ids_enabled\":";
+    json += firewall.idsEnabled ? "true" : "false";
+    json += ",\"ids_events\":";
+    json += firewall.idsEvents;
+    json += ",\"suspicious_404_count\":";
+    json += firewall.suspicious404Count;
+    json += ",\"sensitive_path_hits\":";
+    json += firewall.sensitivePathHits;
     json += "}";
+    json += ",\"ids\":{\"enabled\":";
+    json += firewall.idsEnabled ? "true" : "false";
+    json += ",\"events\":";
+    json += firewall.idsEvents;
+    json += ",\"suspicious_404_count\":";
+    json += firewall.suspicious404Count;
+    json += ",\"sensitive_path_hits\":";
+    json += firewall.sensitivePathHits;
+    json += "}";
+    json += ",\"gateway\":";
+    appendGatewayJson(json);
     json += ",\"storage\":";
     appendStorageJson(json);
     json += ",\"persistence\":";
@@ -1018,9 +1268,24 @@ void handleDemoFlood()
     redirectToLogs();
 }
 
+void handleDemoIds()
+{
+    registerHttpAccess("/demo/ids");
+    addIdsDemoEvent("Simulacao controlada de assinatura IDS", "assinatura didatica");
+    redirectToLogs();
+}
+
+void handleGateway()
+{
+    registerHttpAccess("/gateway");
+    server.send(200, "text/html; charset=utf-8", buildGatewayPage());
+}
+
 void handleNotFound()
 {
-    registerHttpAccess("404", false);
+    const String route = server.uri();
+    registerHttpAccess(route.c_str(), false);
+    registerIdsNotFound(route.c_str());
     server.send(404, "text/plain; charset=utf-8", "Rota nao encontrada");
 }
 
@@ -1049,7 +1314,7 @@ void setupEnergySensor()
 
 void setupAccessPoint()
 {
-    WiFi.mode(WIFI_AP);
+    WiFi.mode(WIFI_AP_STA);
     const bool apStarted = WiFi.softAP(AP_SSID, AP_PASSPHRASE);
 
     Serial.print("Wi-Fi AP SSID: ");
@@ -1060,6 +1325,31 @@ void setupAccessPoint()
     Serial.println(WiFi.softAPIP());
 
     addEvent(apStarted ? "INFO" : "ERROR", "WIFI", apStarted ? "Wi-Fi AP iniciado" : "Falha ao iniciar Wi-Fi AP", WiFi.softAPIP().toString().c_str());
+
+    if (!upstreamWifiConfigured()) {
+        addEvent("INFO", "WIFI", "Upstream Wi-Fi nao configurado", "AP_ONLY");
+        refreshGatewaySnapshot(false);
+        return;
+    }
+
+    if (gatewayMutex != nullptr && xSemaphoreTake(gatewayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gatewaySnapshot.lastConnectAttemptMs = millis();
+        xSemaphoreGive(gatewayMutex);
+    }
+    addEvent("INFO", "WIFI", "Tentativa de conexao upstream", UPSTREAM_WIFI_SSID);
+    WiFi.begin(UPSTREAM_WIFI_SSID, UPSTREAM_WIFI_PASSPHRASE);
+
+    const unsigned long startMs = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - startMs < UPSTREAM_CONNECT_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    refreshGatewaySnapshot(false);
+    if (WiFi.status() == WL_CONNECTED) {
+        addEvent("INFO", "WIFI", "Upstream Wi-Fi conectado", WiFi.localIP().toString().c_str());
+    } else {
+        addEvent("WARN", "WIFI", "Falha de conexao upstream", UPSTREAM_WIFI_SSID);
+    }
 }
 
 void setupWebServer()
@@ -1069,6 +1359,7 @@ void setupWebServer()
     server.on("/api/events", HTTP_GET, handleEventsApi);
     server.on("/api/events/persistent", HTTP_GET, handlePersistentEventsApi);
     server.on("/evidencias", HTTP_GET, handleEvidences);
+    server.on("/gateway", HTTP_GET, handleGateway);
     server.on("/logs", HTTP_GET, handleLogs);
     server.on("/eventos", HTTP_GET, handleLogs);
     server.on("/logs/clear-persistent", HTTP_GET, handleClearPersistentLogs);
@@ -1076,6 +1367,7 @@ void setupWebServer()
     server.on("/demo/warn", HTTP_GET, handleDemoWarn);
     server.on("/demo/security", HTTP_GET, handleDemoSecurity);
     server.on("/demo/flood", HTTP_GET, handleDemoFlood);
+    server.on("/demo/ids", HTTP_GET, handleDemoIds);
     server.onNotFound(handleNotFound);
     server.begin();
 
@@ -1137,6 +1429,7 @@ void setup()
     metricsMutex = xSemaphoreCreateMutex();
     eventsMutex = xSemaphoreCreateMutex();
     firewallMutex = xSemaphoreCreateMutex();
+    gatewayMutex = xSemaphoreCreateMutex();
     setupPersistentStorage();
     addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);
     setupEnergySensor();
