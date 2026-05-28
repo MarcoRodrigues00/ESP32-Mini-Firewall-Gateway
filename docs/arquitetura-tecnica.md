@@ -18,7 +18,7 @@ O AP local e obrigatorio para a demonstracao porque permite operar o sistema sem
 
 O firmware usa modo Wi-Fi AP+STA para manter o AP local ativo e, quando houver configuracao de upstream no firmware, tentar conexao a uma rede Wi-Fi externa. A pagina `/gateway` mostra SSID e IP do AP, estado da STA, RSSI quando conectado, IP upstream, quantidade de clientes no AP e contadores relacionados ao IDS didatico.
 
-Nesta fase, o gateway e telemetrico e didatico. NAT e roteamento real nao estao implementados como comportamento de entrega. O campo relacionado a NAT deve ser tratado como experimental ou nao implementado.
+Nesta fase, o gateway e telemetrico e didatico. NAT e roteamento sao tratados como tentativa experimental, com fallback documentado quando o core/lwIP nao oferece suporte.
 
 ## WebServer sincrono
 
@@ -107,4 +107,12 @@ A sprint adiciona a pagina `/wifi` para salvar, limpar e reconectar a rede Wi-Fi
 
 A configuracao local usa LittleFS no arquivo `/wifi.json`, reaproveitando a infraestrutura ja inicializada para logs persistentes. A passphrase fica armazenada apenas localmente para permitir a conexao STA e nao e renderizada em HTML, nao entra em `/api/status`, nao aparece em logs e nao e impressa no Serial.
 
-A tentativa de conexao usa timeout curto e controlado. Se o upstream falhar, o dashboard, `/wifi`, `/gateway` e demais rotas continuam acessiveis pelo AP local. NAT real e monitoramento profundo de pacotes permanecem fora do escopo.
+A tentativa de conexao usa timeout curto e controlado. Se o upstream falhar, o dashboard, `/wifi`, `/gateway` e demais rotas continuam acessiveis pelo AP local. NAT e experimental; monitoramento profundo de pacotes permanece fora do escopo.
+
+## NAT experimental
+
+O firmware possui a flag `NAT_EXPERIMENTAL_ENABLED` para tentar habilitar NAT/NAPT quando o AP esta ativo, a STA esta conectada ao upstream e ha IP upstream valido. A tentativa usa suporte lwIP quando disponivel no core Arduino-ESP32 instalado.
+
+O snapshot NAT mantem `experimentalEnabled`, `supported`, `enabled`, `active`, `lastAttemptMs`, `lastStatus`, `lastError` e `note`. Esses dados aparecem em `/gateway`, `/evidencias` e `/api/status`.
+
+Se o core/lwIP nao tiver NAPT/IP forward linkavel, o sistema registra evento e mostra `nao suportado`. O fallback esperado e manter AP, painel, `/wifi` e demais rotas funcionando sem travar.

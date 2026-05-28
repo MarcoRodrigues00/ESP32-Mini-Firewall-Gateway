@@ -3,15 +3,20 @@
 #include <LittleFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <lwip/opt.h>
+#if IP_NAPT && IP_FORWARD
+#include <lwip/lwip_napt.h>
+#endif
 #include <cstdio>
 #include <cstring>
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.11.0-sprint-wifi-upstream";
-constexpr const char *PROJECT_PHASE = "Sprint configuracao Wi-Fi upstream pelo painel";
+constexpr const char *PROJECT_VERSION = "0.12.0-sprint-nat-experimental";
+constexpr const char *PROJECT_PHASE = "Sprint NAT experimental AP+STA";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSPHRASE = "esp32lab123";
+constexpr bool NAT_EXPERIMENTAL_ENABLED = true;
 constexpr unsigned long UPSTREAM_CONNECT_TIMEOUT_MS = 3000UL;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
 constexpr uint32_t WEB_SERVER_INTERVAL_MS = 10UL;
@@ -45,6 +50,7 @@ SemaphoreHandle_t eventsMutex = nullptr;
 SemaphoreHandle_t firewallMutex = nullptr;
 SemaphoreHandle_t gatewayMutex = nullptr;
 SemaphoreHandle_t wifiConfigMutex = nullptr;
+SemaphoreHandle_t natMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
 TaskHandle_t metricsTaskHandle = nullptr;
 TaskHandle_t heartbeatTaskHandle = nullptr;
@@ -72,6 +78,7 @@ const ModuleInfo MODULES[] = {
     {"Metricas", "ativo"},
     {"Firewall didatico", "ativo"},
     {"Gateway AP+STA", "ativo"},
+    {"NAT experimental", "ativo"},
     {"IDS didatico", "ativo"},
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
@@ -141,6 +148,17 @@ struct WifiUpstreamConfig {
     bool passphrasePresent;
 };
 
+struct NatSnapshot {
+    bool experimentalEnabled;
+    bool supported;
+    bool enabled;
+    bool active;
+    unsigned long lastAttemptMs;
+    char lastStatus[28];
+    char lastError[72];
+    char note[96];
+};
+
 struct MetricsSnapshot {
     unsigned long uptimeSeconds;
     uint32_t freeHeap;
@@ -168,6 +186,7 @@ MetricsSnapshot metricsSnapshot = {};
 FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD_WINDOW_MS, FIREWALL_FLOOD_THRESHOLD, true, 0, 0, 0};
 GatewaySnapshot gatewaySnapshot = {true, "ESP32-Firewall-Lab", "0.0.0.0", false, false, "nao configurado", "0.0.0.0", 0, 0, 0, 0, "AP_ONLY", false, false, "nao configurado", ""};
 WifiUpstreamConfig wifiConfig = {false, "", "", false};
+NatSnapshot natSnapshot = {NAT_EXPERIMENTAL_ENABLED, false, NAT_EXPERIMENTAL_ENABLED, false, 0, "inicializando", "", "NAT experimental depende de suporte NAPT no lwIP"};
 EventRecord events[EVENT_CAPACITY] = {};
 bool ina219Available = false;
 bool littleFsAvailable = false;
@@ -206,6 +225,7 @@ void copyText(char *target, size_t targetSize, const char *source)
 
 void addEvent(const char *level, const char *source, const char *message, const char *value);
 void refreshGatewaySnapshot(bool logChanges);
+void evaluateNatState(bool logChanges);
 void attemptUpstreamConnection(const char *reason);
 
 void appendJsonEscaped(String &json, const char *text)
@@ -266,7 +286,7 @@ bool isImportantPersistentEvent(const char *level, const char *source, const cha
 
     if (std::strcmp(source, "SYSTEM") == 0 || std::strcmp(source, "STORAGE") == 0 ||
         std::strcmp(source, "SENSOR") == 0 || std::strcmp(source, "ENERGY") == 0 ||
-        std::strcmp(source, "WIFI") == 0) {
+        std::strcmp(source, "WIFI") == 0 || std::strcmp(source, "NAT") == 0) {
         return true;
     }
 
@@ -381,6 +401,124 @@ GatewaySnapshot readGatewaySnapshot()
         xSemaphoreGive(gatewayMutex);
     }
     return snapshot;
+}
+
+NatSnapshot readNatSnapshot()
+{
+    NatSnapshot snapshot = {NAT_EXPERIMENTAL_ENABLED, false, NAT_EXPERIMENTAL_ENABLED, false, 0, "indisponivel", "", "NAT experimental depende de suporte NAPT no lwIP"};
+    if (natMutex != nullptr && xSemaphoreTake(natMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snapshot = natSnapshot;
+        xSemaphoreGive(natMutex);
+    }
+    return snapshot;
+}
+
+bool natCompileTimeSupported()
+{
+#if IP_NAPT && IP_FORWARD
+    return true;
+#else
+    return false;
+#endif
+}
+
+void updateNatSnapshot(bool active, unsigned long attemptMs, const char *status, const char *error, const char *note)
+{
+    if (natMutex != nullptr && xSemaphoreTake(natMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        natSnapshot.experimentalEnabled = NAT_EXPERIMENTAL_ENABLED;
+        natSnapshot.supported = natCompileTimeSupported();
+        natSnapshot.enabled = NAT_EXPERIMENTAL_ENABLED;
+        natSnapshot.active = active;
+        if (attemptMs > 0) {
+            natSnapshot.lastAttemptMs = attemptMs;
+        }
+        copyText(natSnapshot.lastStatus, sizeof(natSnapshot.lastStatus), status);
+        copyText(natSnapshot.lastError, sizeof(natSnapshot.lastError), error);
+        copyText(natSnapshot.note, sizeof(natSnapshot.note), note);
+        xSemaphoreGive(natMutex);
+    }
+}
+
+void setGatewayNatActive(bool active)
+{
+    if (gatewayMutex != nullptr && xSemaphoreTake(gatewayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        gatewaySnapshot.natEnabled = active;
+        xSemaphoreGive(gatewayMutex);
+    }
+}
+
+bool natStatusChanged(const NatSnapshot &snapshot, bool active, const char *status, const char *error)
+{
+    return snapshot.active != active || std::strcmp(snapshot.lastStatus, status) != 0 || std::strcmp(snapshot.lastError, error) != 0;
+}
+
+void evaluateNatState(bool logChanges)
+{
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    const NatSnapshot before = readNatSnapshot();
+    const unsigned long now = millis();
+    const char *experimentalNote = "NAT experimental; desempenho e estabilidade dependem do core/lwIP e do upstream";
+
+    if (!NAT_EXPERIMENTAL_ENABLED) {
+#if IP_NAPT && IP_FORWARD
+        if (before.active) {
+            ip_napt_enable(static_cast<uint32_t>(WiFi.softAPIP()), 0);
+        }
+#endif
+        updateNatSnapshot(false, now, "desabilitado", "", "Feature flag NAT_EXPERIMENTAL_ENABLED=false");
+        setGatewayNatActive(false);
+        if (logChanges && natStatusChanged(before, false, "desabilitado", "")) {
+            addEvent("INFO", "NAT", "NAT experimental desabilitado", "feature flag");
+        }
+        return;
+    }
+
+    if (!gateway.apEnabled || gateway.apIp[0] == '\0' || std::strcmp(gateway.apIp, "0.0.0.0") == 0) {
+        updateNatSnapshot(false, now, "aguardando AP", "AP indisponivel", experimentalNote);
+        setGatewayNatActive(false);
+        if (logChanges && natStatusChanged(before, false, "aguardando AP", "AP indisponivel")) {
+            addEvent("WARN", "NAT", "NAT aguardando AP", "AP indisponivel");
+        }
+        return;
+    }
+
+    if (!gateway.staConnected || std::strcmp(gateway.upstreamIp, "0.0.0.0") == 0) {
+#if IP_NAPT && IP_FORWARD
+        if (before.active) {
+            ip_napt_enable(static_cast<uint32_t>(WiFi.softAPIP()), 0);
+        }
+#endif
+        updateNatSnapshot(false, now, "aguardando upstream", "upstream desconectado", experimentalNote);
+        setGatewayNatActive(false);
+        if (logChanges && natStatusChanged(before, false, "aguardando upstream", "upstream desconectado")) {
+            addEvent("INFO", "NAT", "NAT desativado por falta de upstream", "STA desconectada");
+        }
+        return;
+    }
+
+    if (!natCompileTimeSupported()) {
+        updateNatSnapshot(false, now, "nao suportado", "lwIP sem IP_NAPT/IP_FORWARD linkavel", "Core atual nao exporta NAPT; AP e painel seguem operando");
+        setGatewayNatActive(false);
+        if (logChanges && natStatusChanged(before, false, "nao suportado", "lwIP sem IP_NAPT/IP_FORWARD linkavel")) {
+            addEvent("WARN", "NAT", "NAT indisponivel no core atual", "lwIP sem NAPT");
+        }
+        return;
+    }
+
+#if IP_NAPT && IP_FORWARD
+    if (logChanges && !before.active) {
+        addEvent("INFO", "NAT", "Tentativa de habilitar NAT", gateway.apIp);
+    }
+    ip_napt_enable(static_cast<uint32_t>(WiFi.softAPIP()), 1);
+    updateNatSnapshot(true, now, "ativo", "", experimentalNote);
+    setGatewayNatActive(true);
+    if (logChanges && natStatusChanged(before, true, "ativo", "")) {
+        addEvent("INFO", "NAT", "NAT experimental ativo", gateway.apIp);
+    }
+#else
+    updateNatSnapshot(false, now, "nao suportado", "lwIP sem IP_NAPT/IP_FORWARD linkavel", "Core atual nao exporta NAPT; AP e painel seguem operando");
+    setGatewayNatActive(false);
+#endif
 }
 
 WifiUpstreamConfig readWifiConfig()
@@ -659,6 +797,7 @@ void refreshGatewaySnapshot(bool logChanges)
 
     lastStaConnected = connected;
     lastGatewayClientCount = clients;
+    evaluateNatState(logChanges);
 }
 
 void addEvent(const char *level, const char *source, const char *message, const char *value = nullptr)
@@ -1281,12 +1420,47 @@ void appendGatewayJson(String &json)
     appendJsonEscaped(json, gateway.lastError);
     json += "\",\"client_count\":";
     json += gateway.clientCount;
-    json += ",\"nat_enabled\":false,\"nat_note\":\"experimental/not implemented\"}";
+    const NatSnapshot nat = readNatSnapshot();
+    json += ",\"nat_enabled\":";
+    json += nat.enabled ? "true" : "false";
+    json += ",\"nat_active\":";
+    json += nat.active ? "true" : "false";
+    json += ",\"nat_supported\":";
+    json += nat.supported ? "true" : "false";
+    json += ",\"nat_status\":\"";
+    appendJsonEscaped(json, nat.lastStatus);
+    json += "\",\"nat_error\":\"";
+    appendJsonEscaped(json, nat.lastError);
+    json += "\",\"nat_note\":\"";
+    appendJsonEscaped(json, nat.note);
+    json += "\"}";
 }
 
 void appendWifiUpstreamJson(String &json)
 {
     appendGatewayJson(json);
+}
+
+void appendNatJson(String &json)
+{
+    const NatSnapshot nat = readNatSnapshot();
+    json += "{\"experimental_enabled\":";
+    json += nat.experimentalEnabled ? "true" : "false";
+    json += ",\"supported\":";
+    json += nat.supported ? "true" : "false";
+    json += ",\"enabled\":";
+    json += nat.enabled ? "true" : "false";
+    json += ",\"active\":";
+    json += nat.active ? "true" : "false";
+    json += ",\"last_attempt_ms\":";
+    json += nat.lastAttemptMs;
+    json += ",\"last_status\":\"";
+    appendJsonEscaped(json, nat.lastStatus);
+    json += "\",\"last_error\":\"";
+    appendJsonEscaped(json, nat.lastError);
+    json += "\",\"note\":\"";
+    appendJsonEscaped(json, nat.note);
+    json += "\"}";
 }
 
 String gatewayStatusText(const GatewaySnapshot &gateway)
@@ -1344,6 +1518,7 @@ String buildGatewayPage()
 {
     const GatewaySnapshot gateway = readGatewaySnapshot();
     const FirewallSnapshot firewall = readFirewallSnapshot();
+    const NatSnapshot nat = readNatSnapshot();
     String html;
     html.reserve(5200);
     appendPageHead(html, "Gateway - ESP32 Mini Firewall Gateway");
@@ -1929,6 +2104,8 @@ void setup()
     firewallMutex = xSemaphoreCreateMutex();
     gatewayMutex = xSemaphoreCreateMutex();
     wifiConfigMutex = xSemaphoreCreateMutex();
+    natMutex = xSemaphoreCreateMutex();
+    updateNatSnapshot(false, 0, "inicializando", "", "NAT experimental depende de suporte NAPT no lwIP");
     setupPersistentStorage();
     loadWifiConfigFile();
     addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);

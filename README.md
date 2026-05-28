@@ -131,7 +131,7 @@ Regra didatica atual: mais de 20 requisicoes em 10 segundos gera evento `SECURIT
 
 O firmware usa `WiFi.mode(WIFI_AP_STA)` para manter o AP local `ESP32-Firewall-Lab` em `http://192.168.4.1` e, opcionalmente, tentar conexao a uma rede Wi-Fi upstream configurada por constantes didaticas no firmware. Os placeholders upstream ficam vazios por padrao, portanto o status esperado sem configuracao e `nao configurado`.
 
-A pagina `/gateway` mostra modo Wi-Fi, SSID/IP do AP, status do upstream, RSSI quando conectado, clientes no AP e contadores do IDS didatico. Nesta sprint, NAT e roteamento real nao estao implementados; qualquer mencao a NAT aparece como `experimental/not implemented`. O objetivo e telemetria de bancada e eventos de seguranca, nao compartilhar internet nem atuar como firewall profissional de pacotes.
+A pagina `/gateway` mostra modo Wi-Fi, SSID/IP do AP, status do upstream, RSSI quando conectado, clientes no AP e contadores do IDS didatico. Nesta sprint, NAT e roteamento sao tratados como tentativa experimental, com status claro quando o core/lwIP nao oferece suporte. O objetivo e telemetria de bancada e eventos de seguranca, nao compartilhar internet nem atuar como firewall profissional de pacotes.
 
 ## INA219 e metricas de energia
 
@@ -230,4 +230,12 @@ A rota de limpeza e didatica de laboratorio e nao possui autenticacao nesta fase
 
 A rota `/wifi` permite configurar a rede Wi-Fi upstream usada pela interface AP+STA didatica. O AP local `ESP32-Firewall-Lab` continua ativo em `192.168.4.1` para recuperacao mesmo se a conexao upstream falhar.
 
-A configuracao salva mostra apenas SSID e indicadores de estado. A senha/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT real continua fora do escopo desta sprint.
+A configuracao salva mostra apenas SSID e indicadores de estado. A senha/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT agora e experimental e continua sem promessa de roteador profissional.
+
+## NAT experimental
+
+A sprint `0.12.0-sprint-nat-experimental` adiciona uma tentativa controlada de NAT/NAPT para clientes conectados ao AP `ESP32-Firewall-Lab` usarem o upstream Wi-Fi configurado em `/wifi`. A feature flag `NAT_EXPERIMENTAL_ENABLED` permite desabilitar a tentativa rapidamente se houver instabilidade.
+
+No core Arduino-ESP32 instalado neste ambiente, os headers de NAPT existem, mas a biblioteca lwIP usada pelo build pode nao exportar suporte NAPT/IP forward. Quando isso ocorrer, `/gateway` e `/api/status` mostram NAT como `nao suportado`, sem travar o firmware. O AP local, `/wifi`, dashboard e logs continuam acessiveis.
+
+Teste manual: conectar o ESP32 ao upstream pela pagina `/wifi`, conectar um cliente ao AP do ESP32 e tentar abrir um site HTTP/HTTPS. O resultado depende do core/lwIP, da rede upstream e do cliente. NAT experimental nao substitui roteador, firewall profissional ou IDS/IPS.

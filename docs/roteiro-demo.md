@@ -46,7 +46,7 @@ Mostrar:
 - quantidade de clientes no AP;
 - contadores de IDS didatico.
 
-Fala sugerida: "O gateway desta sprint e didatico. O ESP32 opera em AP+STA, mostra telemetria da rede local e do upstream quando configurado, mas NAT real nao faz parte da entrega atual."
+Fala sugerida: "O gateway desta sprint e didatico. O ESP32 opera em AP+STA, mostra telemetria da rede local e do upstream quando configurado, e NAT aparece como tentativa experimental, dependendo do suporte do core/lwIP."
 
 ## Gerar eventos INFO, WARN e SECURITY
 
@@ -104,7 +104,7 @@ Encerrar mostrando a secao de limitacoes em `/demo`.
 
 Pontos obrigatorios:
 
-- NAT real nao esta implementado nesta fase.
+- NAT e experimental e pode aparecer como nao suportado no core atual.
 - O firewall e didatico e limitado aos acessos HTTP ao painel.
 - O IDS e didatico e baseado em HTTP do painel.
 - O sistema nao inspeciona HTTPS.
@@ -130,3 +130,13 @@ Mostrar:
 - botoes para salvar, reconectar e limpar.
 
 Fala sugerida: "A passphrase nao aparece na interface, API, logs ou Serial. Esta tela ainda nao tem autenticacao e por isso e restrita ao laboratorio."
+
+## Mostrar NAT experimental
+
+Abrir `/gateway` depois de conectar o upstream em `/wifi`.
+
+Fala sugerida: "Esta sprint tenta habilitar NAT experimental para clientes do AP usarem o upstream do ESP32. O firmware mostra se a flag esta ligada, se o core suporta NAPT e se o NAT ficou ativo."
+
+Se aparecer `nao suportado`, explicar: "O firmware nao travou; ele detectou que o core/lwIP atual nao oferece NAPT linkavel. O AP local e o painel continuam funcionando."
+
+Teste manual, se houver suporte: conectar outro cliente ao AP `ESP32-Firewall-Lab` e tentar acessar um site HTTP/HTTPS. O resultado nao e prometido como roteador profissional.

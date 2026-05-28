@@ -34,7 +34,7 @@ Este backlog organiza os proximos passos ate a entrega e defesa. A ordem prioriz
 
 ## Somente se sobrar tempo
 
-1. Investigar NAT experimental AP+STA.
+1. Validar NAT experimental AP+STA no hardware real.
 2. Criar teste de longa duracao para historico de 24 horas.
 3. Adicionar display local, se o driver e a pinagem forem confirmados.
 
@@ -46,3 +46,10 @@ Este backlog organiza os proximos passos ate a entrega e defesa. A ordem prioriz
 - WAF.
 - SIEM/SOAR.
 - Gateway de producao para compartilhar internet.
+
+## NAT experimental
+
+1. Testar manualmente com cliente conectado ao AP e upstream real.
+2. Registrar se o core atual mostra NAT como ativo ou nao suportado.
+3. Medir estabilidade basica antes de considerar a feature em apresentacao.
+4. Manter fallback documentado caso NAPT nao esteja disponivel no ambiente da defesa.

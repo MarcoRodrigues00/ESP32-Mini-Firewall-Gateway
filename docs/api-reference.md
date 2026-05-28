@@ -160,3 +160,18 @@ As rotas abaixo sao atendidas pelo `WebServer.h` sincrono embarcado no ESP32. To
 ## Campos de Wi-Fi em `/api/status`
 
 O objeto `gateway` foi expandido e o alias `wifi_upstream` foi adicionado com campos de estado sem expor a passphrase: `configured`/`sta_configured`, `ssid_present`, `ssid_masked`, `passphrase_present`, `connected`/`sta_connected`, `ip`/`upstream_ip`, `rssi`/`upstream_rssi`, `last_attempt_ms`, `last_status` e `last_error`.
+
+## Objeto `nat` em `/api/status`
+
+A rota `/api/status` inclui o objeto `nat` para a sprint NAT experimental:
+
+- `experimental_enabled`: indica a feature flag `NAT_EXPERIMENTAL_ENABLED`;
+- `supported`: indica se o build/core tem suporte NAPT/IP forward disponivel;
+- `enabled`: indica se a tentativa esta habilitada no firmware;
+- `active`: indica se o NAT foi marcado como ativo;
+- `last_attempt_ms`: instante da ultima avaliacao/tentativa;
+- `last_status`: estado textual, como `ativo`, `aguardando upstream` ou `nao suportado`;
+- `last_error`: ultimo erro textual;
+- `note`: observacao de escopo.
+
+Campos resumidos tambem aparecem em `gateway`: `nat_enabled`, `nat_active`, `nat_supported`, `nat_status`, `nat_error` e `nat_note`. NAT e experimental, pode nao funcionar no core atual e nao substitui roteador/firewall profissional.

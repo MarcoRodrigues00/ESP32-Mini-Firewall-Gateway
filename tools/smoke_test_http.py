@@ -142,6 +142,7 @@ def validate_status(results: List[Result], base_url: str, data: Any) -> Dict[str
         "modules": isinstance(data.get("modules"), list),
         "firewall": isinstance(data.get("firewall"), dict),
         "gateway": isinstance(data.get("gateway"), dict),
+        "nat ou gateway.nat": isinstance(data.get("nat"), dict) or isinstance(data.get("gateway"), dict) and "nat_enabled" in data.get("gateway", {}),
         "storage ou persistence": isinstance(data.get("storage"), dict) or isinstance(data.get("persistence"), dict),
     }
     firewall = data.get("firewall") if isinstance(data.get("firewall"), dict) else {}
@@ -189,6 +190,42 @@ def validate_wifi_upstream(results: List[Result], base_url: str, data: Any) -> N
         url,
         not missing and not forbidden,
         "campos ok; sem segredo exposto" if not missing and not forbidden else "faltando: " + ", ".join(missing) + ("; chaves proibidas: " + ", ".join(forbidden) if forbidden else ""),
+    )
+
+def validate_nat_status(results: List[Result], base_url: str, data: Any) -> None:
+    url = make_url(base_url, "/api/status")
+    if not isinstance(data, dict):
+        add_result(results, "Schema NAT experimental", url, False, "JSON nao e objeto")
+        return
+    nat = data.get("nat") if isinstance(data.get("nat"), dict) else None
+    gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+    checks = {}
+    if isinstance(nat, dict):
+        checks = {
+            "experimental_enabled": "experimental_enabled" in nat,
+            "supported": "supported" in nat,
+            "enabled": "enabled" in nat,
+            "active": "active" in nat,
+            "last_status": "last_status" in nat,
+            "last_error": "last_error" in nat,
+            "note": "note" in nat,
+        }
+    else:
+        checks = {
+            "gateway.nat_enabled": "nat_enabled" in gateway,
+            "gateway.nat_active": "nat_active" in gateway,
+            "gateway.nat_supported": "nat_supported" in gateway,
+            "gateway.nat_status": "nat_status" in gateway,
+            "gateway.nat_error": "nat_error" in gateway,
+            "gateway.nat_note": "nat_note" in gateway,
+        }
+    missing = [name for name, ok in checks.items() if not ok]
+    add_result(
+        results,
+        "Schema NAT experimental",
+        url,
+        not missing,
+        "campos NAT ok" if not missing else "faltando: " + ", ".join(missing),
     )
 
 def validate_events(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/events") -> None:
@@ -287,6 +324,7 @@ def write_report(
     firewall = status.get("firewall", {}) if isinstance(status.get("firewall"), dict) else {}
     gateway = status.get("gateway", {}) if isinstance(status.get("gateway"), dict) else {}
     upstream = status.get("wifi_upstream", gateway) if isinstance(status.get("wifi_upstream", gateway), dict) else {}
+    nat = status.get("nat") if isinstance(status.get("nat"), dict) else {}
     storage = storage_summary(status, persistent)
     version = status.get("firmware_version") or status.get("version") or "n/d"
     uptime = status.get("uptime_ms", "n/d")
@@ -325,6 +363,7 @@ def write_report(
             f"- Firewall total requests: `{firewall.get('total_requests', 'n/d')}`",
             f"- Gateway mode: `{gateway.get('mode', 'n/d')}`",
             f"- Gateway upstream: configured=`{upstream.get('sta_configured', upstream.get('configured', 'n/d'))}` / connected=`{upstream.get('sta_connected', upstream.get('connected', 'n/d'))}` / ip=`{upstream.get('upstream_ip', upstream.get('ip', 'n/d'))}`",
+            f"- NAT experimental: enabled=`{nat.get('enabled', gateway.get('nat_enabled', 'n/d'))}` / active=`{nat.get('active', gateway.get('nat_active', 'n/d'))}` / status=`{nat.get('last_status', gateway.get('nat_status', 'n/d'))}`",
             f"- Storage available: `{storage['available']}`",
             f"- Persistent log size: `{storage['file_size']}` / `{storage['max_size']}` bytes",
             "",
@@ -340,7 +379,7 @@ def write_report(
             "- Smoke test nao substitui teste fisico dos sensores.",
             "- INA219 fisico fica para fase final porque depende da solda/montagem.",
             "- Firewall e IDS sao didaticos e baseados em HTTP do painel.",
-            "- Gateway AP+STA nao implementa NAT/roteamento real nesta sprint.",
+            "- NAT experimental depende do core/lwIP e do ambiente fisico; o smoke test nao exige internet real.",
             "- Smoke test valida /wifi e schema, mas nao automatiza envio de credencial upstream.",
             "",
         ]
@@ -357,7 +396,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/evidencias", ("Evidencia", "execucao", "Energia", "Seguranca")),
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
-        ("/gateway", ("Gateway", "AP", "STA", "IDS")),
+        ("/gateway", ("Gateway", "AP", "STA", "NAT experimental")),
         ("/wifi", ("Wi-Fi upstream", "SSID", "Passphrase", "recuperacao")),
         ("/demo", ("Demo guiada", "roteiro", "TDE")),
     ]
@@ -368,6 +407,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
     status_obj = validate_status(results, base_url, status) if status is not None else {}
     if status is not None:
         validate_wifi_upstream(results, base_url, status)
+        validate_nat_status(results, base_url, status)
 
     events_before = check_json_route(results, base_url, "/api/events")
     if events_before is not None:

@@ -129,7 +129,7 @@ Depois de gerar eventos e confirmar que `/api/events/persistent` responde:
 - O smoke test nao substitui teste fisico dos sensores.
 - O INA219 fisico fica para a fase final porque depende de solda/montagem.
 - O firewall e IDS sao didaticos e baseados em acessos HTTP ao painel.
-- O gateway AP+STA nao implementa NAT/roteamento real nesta sprint.
+- O NAT e experimental e pode aparecer como nao suportado dependendo do core/lwIP.
 - O teste nao executa ataque real; `/demo/flood` e `/demo/ids` sao simulacoes controladas.
 
 ## Validacao de Wi-Fi upstream
@@ -137,3 +137,7 @@ Depois de gerar eventos e confirmar que `/api/events/persistent` responde:
 O smoke test tambem valida a pagina `/wifi` e o schema de Wi-Fi upstream em `/api/status`. Ele verifica campos de estado como configurado, conectado, IP, RSSI, ultima tentativa, ultimo status e ultimo erro.
 
 O teste nao automatiza envio de credencial upstream. Isso evita colocar senha real em terminal, relatorio Markdown ou historico do projeto. A validacao da conexao real deve ser feita manualmente pela pagina `/wifi` quando o ESP32 estiver em bancada.
+
+## Validacao de NAT experimental
+
+O smoke test valida que `/gateway` menciona NAT experimental e que `/api/status` contem objeto `nat` ou campos NAT dentro de `gateway`. Ele verifica schema e status, mas nao exige que a internet funcione pelo AP porque isso depende do core/lwIP, do upstream e do ambiente fisico.

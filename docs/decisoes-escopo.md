@@ -59,3 +59,11 @@ A configuracao de Wi-Fi upstream foi adicionada para facilitar a demonstracao em
 A configuracao fica em LittleFS (`/wifi.json`) porque o projeto ja inicializa esse filesystem e a necessidade e simples. A passphrase e necessaria localmente para conectar a STA, mas nao e exposta em pagina, API, eventos, Serial ou relatorios do smoke test.
 
 Nao ha autenticacao nessa fase. Por isso, `/wifi`, `/wifi/save`, `/wifi/clear` e `/wifi/reconnect` devem ser usados apenas no AP local de laboratorio. Autenticacao fica para sprint futura se houver tempo e necessidade.
+
+## NAT experimental com fallback
+
+A decisao desta sprint e tentar NAT de forma experimental, sem transformar o projeto em roteador profissional. A feature flag `NAT_EXPERIMENTAL_ENABLED` permite desligar a tentativa caso gere instabilidade.
+
+O core instalado foi inspecionado localmente: ha headers de NAPT no lwIP, mas o `sdkconfig` do pacote nao habilita IP forward e a biblioteca precompilada pode nao exportar os simbolos NAPT. Por isso, o firmware trata suporte como condicional e documenta `nao suportado` quando necessario, em vez de quebrar o boot.
+
+NAT depende de upstream conectado, IP valido e suporte do core/lwIP. Mesmo quando ativo, desempenho e estabilidade sao limitados e nao substituem roteador/firewall profissional.
