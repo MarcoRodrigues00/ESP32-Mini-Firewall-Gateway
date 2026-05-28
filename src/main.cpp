@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Adafruit_INA219.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <cstdio>
@@ -6,13 +7,17 @@
 
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
-constexpr const char *PROJECT_VERSION = "0.6.0-sprint-visual";
-constexpr const char *PROJECT_PHASE = "Sprint revisao visual tecnica";
+constexpr const char *PROJECT_VERSION = "0.7.0-sprint-ina219";
+constexpr const char *PROJECT_PHASE = "Sprint integracao INA219";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
 constexpr const char *AP_PASSPHRASE = "esp32lab123";
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;
 constexpr uint32_t WEB_SERVER_INTERVAL_MS = 10UL;
 constexpr uint32_t METRICS_INTERVAL_MS = 1000UL;
+constexpr float ENERGY_LOW_VOLTAGE_V = 4.75F;
+constexpr float ENERGY_HIGH_CURRENT_MA = 500.0F;
+constexpr float ENERGY_HIGH_POWER_MW = 2500.0F;
+constexpr unsigned long ENERGY_ALERT_COOLDOWN_MS = 60000UL;
 constexpr size_t EVENT_CAPACITY = 40;
 constexpr size_t EVENT_MESSAGE_SIZE = 72;
 constexpr size_t EVENT_VALUE_SIZE = 24;
@@ -20,6 +25,7 @@ constexpr BaseType_t CORE_WEB = 1;
 constexpr BaseType_t CORE_BACKGROUND = 0;
 
 WebServer server(80);
+Adafruit_INA219 ina219;
 SemaphoreHandle_t metricsMutex = nullptr;
 SemaphoreHandle_t eventsMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
@@ -65,6 +71,16 @@ struct EventRecord {
     bool hasValue;
 };
 
+struct EnergySnapshot {
+    bool available;
+    float busVoltageV;
+    float shuntVoltageMv;
+    float currentMa;
+    float powerMw;
+    unsigned long lastUpdateMs;
+    char alertStatus[48];
+};
+
 struct MetricsSnapshot {
     unsigned long uptimeSeconds;
     uint32_t freeHeap;
@@ -73,6 +89,7 @@ struct MetricsSnapshot {
     uint32_t sketchSize;
     char apIp[16];
     char apSsid[33];
+    EnergySnapshot energy;
     uint32_t buildStatusJsonMicros;
     bool buildStatusJsonMeasured;
     uint32_t handleRootMicros;
@@ -89,6 +106,10 @@ struct FunctionTiming {
 
 MetricsSnapshot metricsSnapshot = {};
 EventRecord events[EVENT_CAPACITY] = {};
+bool ina219Available = false;
+unsigned long lastLowVoltageAlertMs = 0;
+unsigned long lastHighCurrentAlertMs = 0;
+unsigned long lastHighPowerAlertMs = 0;
 size_t eventStart = 0;
 size_t eventCount = 0;
 uint32_t nextEventId = 1;
@@ -167,6 +188,42 @@ const char *levelClass(const char *level)
     return "info";
 }
 
+const char *moduleStatus(const ModuleInfo &module)
+{
+    if (std::strcmp(module.name, "Energia") == 0) {
+        return ina219Available ? "ativo" : "indisponivel";
+    }
+    return module.status;
+}
+
+void formatFloat(char *target, size_t targetSize, float value, uint8_t decimals)
+{
+    if (targetSize == 0) {
+        return;
+    }
+    std::snprintf(target, targetSize, "%.*f", decimals, value);
+}
+
+String formattedFloat(float value, uint8_t decimals)
+{
+    char buffer[20];
+    formatFloat(buffer, sizeof(buffer), value, decimals);
+    return String(buffer);
+}
+
+void maybeAddEnergyAlert(bool condition, unsigned long &lastAlertMs, const char *message, float value, const char *unit)
+{
+    const unsigned long now = millis();
+    if (!condition || (lastAlertMs != 0 && now - lastAlertMs < ENERGY_ALERT_COOLDOWN_MS)) {
+        return;
+    }
+
+    char eventValue[EVENT_VALUE_SIZE];
+    std::snprintf(eventValue, sizeof(eventValue), "%.2f %s", value, unit);
+    addEvent("WARN", "SENSOR", message, eventValue);
+    lastAlertMs = now;
+}
+
 MetricsSnapshot readMetricsSnapshot()
 {
     MetricsSnapshot snapshot = {};
@@ -181,6 +238,38 @@ MetricsSnapshot readMetricsSnapshot()
 
 void refreshMetricsSnapshot()
 {
+    EnergySnapshot energy = {};
+    energy.available = ina219Available;
+    copyText(energy.alertStatus, sizeof(energy.alertStatus), ina219Available ? "normal" : "sensor indisponivel");
+
+    if (ina219Available) {
+        energy.busVoltageV = ina219.getBusVoltage_V();
+        energy.shuntVoltageMv = ina219.getShuntVoltage_mV();
+        energy.currentMa = ina219.getCurrent_mA();
+        energy.powerMw = ina219.getPower_mW();
+        energy.lastUpdateMs = millis();
+
+        bool hasAlert = false;
+        if (energy.busVoltageV < ENERGY_LOW_VOLTAGE_V) {
+            copyText(energy.alertStatus, sizeof(energy.alertStatus), "tensao baixa");
+            maybeAddEnergyAlert(true, lastLowVoltageAlertMs, "Tensao baixa no INA219", energy.busVoltageV, "V");
+            hasAlert = true;
+        }
+        if (energy.currentMa > ENERGY_HIGH_CURRENT_MA) {
+            copyText(energy.alertStatus, sizeof(energy.alertStatus), "corrente alta");
+            maybeAddEnergyAlert(true, lastHighCurrentAlertMs, "Corrente alta no INA219", energy.currentMa, "mA");
+            hasAlert = true;
+        }
+        if (energy.powerMw > ENERGY_HIGH_POWER_MW) {
+            copyText(energy.alertStatus, sizeof(energy.alertStatus), "potencia alta");
+            maybeAddEnergyAlert(true, lastHighPowerAlertMs, "Potencia alta no INA219", energy.powerMw, "mW");
+            hasAlert = true;
+        }
+        if (!hasAlert) {
+            copyText(energy.alertStatus, sizeof(energy.alertStatus), "normal");
+        }
+    }
+
     if (metricsMutex == nullptr || xSemaphoreTake(metricsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
         return;
     }
@@ -190,6 +279,7 @@ void refreshMetricsSnapshot()
     metricsSnapshot.minFreeHeap = ESP.getMinFreeHeap();
     metricsSnapshot.flashSize = ESP.getFlashChipSize();
     metricsSnapshot.sketchSize = ESP.getSketchSize();
+    metricsSnapshot.energy = energy;
     copyText(metricsSnapshot.apSsid, sizeof(metricsSnapshot.apSsid), AP_SSID);
     copyText(metricsSnapshot.apIp, sizeof(metricsSnapshot.apIp), WiFi.softAPIP().toString().c_str());
 
@@ -226,7 +316,7 @@ void appendModulesJson(String &json)
         json += "{\"name\":\"";
         json += MODULES[index].name;
         json += "\",\"status\":\"";
-        json += MODULES[index].status;
+        json += moduleStatus(MODULES[index]);
         json += "\"}";
     }
     json += "]";
@@ -376,15 +466,29 @@ String evidencePage()
     html += F("/");
     html += EVENT_CAPACITY;
     html += F("</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid summary\"><div class=\"metric\"><strong>INA219</strong><span><span class=\"badge ");
+    html += snapshot.energy.available ? "ok" : "planned";
+    html += F("\">");
+    html += snapshot.energy.available ? "detectado" : "indisponivel";
+    html += F("</span></span></div><div class=\"metric\"><strong>Tensao</strong><span>");
+    html += snapshot.energy.available ? formattedFloat(snapshot.energy.busVoltageV, 2) + " V" : "n/d";
+    html += F("</span></div><div class=\"metric\"><strong>Corrente</strong><span>");
+    html += snapshot.energy.available ? formattedFloat(snapshot.energy.currentMa, 1) + " mA" : "n/d";
+    html += F("</span></div><div class=\"metric\"><strong>Potencia</strong><span>");
+    html += snapshot.energy.available ? formattedFloat(snapshot.energy.powerMw, 1) + " mW" : "n/d";
+    html += F("</span></div><div class=\"metric\"><strong>Alerta</strong><span>");
+    html += snapshot.energy.alertStatus;
+    html += F("</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Modulos do firmware</h2><div class=\"table-wrap\"><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody>");
     for (size_t index = 0; index < sizeof(MODULES) / sizeof(MODULES[0]); ++index) {
-        const bool active = std::strcmp(MODULES[index].status, "ativo") == 0;
+        const char *status = moduleStatus(MODULES[index]);
+        const bool active = std::strcmp(status, "ativo") == 0;
         html += F("<tr><td>");
         html += MODULES[index].name;
         html += F("</td><td><span class=\"badge ");
         html += active ? "ok" : "planned";
         html += F("\">");
-        html += MODULES[index].status;
+        html += status;
         html += F("</span></td></tr>");
     }
     html += F("</tbody></table></div></div><div class=\"panel\"><h2>Ultimos 5 eventos</h2><div class=\"table-wrap\">");
@@ -421,11 +525,12 @@ String htmlPage()
     html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Metricas do sistema</h2><div class=\"grid\"><div class=\"metric\"><strong>Heap livre</strong><span id=\"freeHeap\">n/d</span></div><div class=\"metric\"><strong>Heap minimo</strong><span id=\"minFreeHeap\">n/d</span></div><div class=\"metric\"><strong>Flash</strong><span id=\"flashSize\">n/d</span></div><div class=\"metric\"><strong>Sketch</strong><span id=\"sketchSize\">n/d</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid\"><div class=\"metric\"><strong>INA219</strong><span id=\"energyStatus\">n/d</span></div><div class=\"metric\"><strong>Tensao</strong><span id=\"energyVoltage\">n/d</span></div><div class=\"metric\"><strong>Corrente</strong><span id=\"energyCurrent\">n/d</span></div><div class=\"metric\"><strong>Potencia</strong><span id=\"energyPower\">n/d</span></div><div class=\"metric\"><strong>Ultimo update</strong><span id=\"energyUpdated\">n/d</span></div><div class=\"metric\"><strong>Alertas</strong><span id=\"energyAlert\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Modulos</h2><div class=\"table-wrap\"><table><thead><tr><th>Modulo</th><th>Status</th></tr></thead><tbody id=\"modulesTable\"><tr><td colspan=\"2\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Tasks FreeRTOS</h2><div class=\"table-wrap\"><table><thead><tr><th>Nome</th><th>Core</th><th>Status</th><th>Stack</th></tr></thead><tbody id=\"tasksTable\"><tr><td colspan=\"4\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"panel\"><h2>Tempos de execucao</h2><div class=\"table-wrap\"><table><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id=\"timingsTable\"><tr><td colspan=\"3\">n/d</td></tr></tbody></table></div></div></div>");
     html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>.</p></div>");
-    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
+    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
     html += F("</main></body></html>");
     return html;
 }
@@ -508,7 +613,23 @@ String buildStatusJson()
         json += "}";
     }
 
-    json += "],\"eventCount\":";
+    json += "],\"energy\":{";
+    json += "\"available\":";
+    json += snapshot.energy.available ? "true" : "false";
+    json += ",\"bus_voltage_v\":";
+    json += formattedFloat(snapshot.energy.busVoltageV, 3);
+    json += ",\"shunt_voltage_mv\":";
+    json += formattedFloat(snapshot.energy.shuntVoltageMv, 3);
+    json += ",\"current_ma\":";
+    json += formattedFloat(snapshot.energy.currentMa, 3);
+    json += ",\"power_mw\":";
+    json += formattedFloat(snapshot.energy.powerMw, 3);
+    json += ",\"last_update_ms\":";
+    json += snapshot.energy.lastUpdateMs;
+    json += ",\"alert_status\":\"";
+    appendJsonEscaped(json, snapshot.energy.alertStatus);
+    json += "\"}";
+    json += ",\"eventCount\":";
     json += readEventCount();
     json += ",\"eventCapacity\":";
     json += EVENT_CAPACITY;
@@ -581,6 +702,18 @@ void handleDemoSecurity()
 void handleNotFound()
 {
     server.send(404, "text/plain; charset=utf-8", "Rota nao encontrada");
+}
+
+void setupEnergySensor()
+{
+    ina219Available = ina219.begin();
+    if (ina219Available) {
+        ina219.setCalibration_32V_2A();
+        addEvent("INFO", "SENSOR", "INA219 iniciado", "I2C 0x40");
+        return;
+    }
+
+    addEvent("WARN", "SENSOR", "INA219 nao detectado", "I2C 0x40");
 }
 
 void setupAccessPoint()
@@ -670,6 +803,7 @@ void setup()
     metricsMutex = xSemaphoreCreateMutex();
     eventsMutex = xSemaphoreCreateMutex();
     addEvent("INFO", "SYSTEM", "Boot do sistema", PROJECT_VERSION);
+    setupEnergySensor();
     setupAccessPoint();
     setupWebServer();
     refreshMetricsSnapshot();

@@ -17,12 +17,14 @@ A base atual compila para `esp32dev` e inclui:
 - pagina de evidencias em `/evidencias` com visual de relatorio academico;
 - sistema de eventos em memoria com buffer circular;
 - API de eventos em `/api/events`;
-- pagina de eventos em `/logs` e alias `/eventos` com timeline por severidade;
+- pagina de eventos em `/logs` e alias `/eventos`;
 - rotas demo controladas para gerar eventos de apresentacao;
+- leitura do INA219 para tensao, corrente e potencia;
+- alertas didaticos de tensao baixa, corrente alta e potencia alta;
 - tasks FreeRTOS para web server, metricas e heartbeat;
-- metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP e tempos de funcoes.
+- metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP, energia e tempos de funcoes.
 
-Ainda estao planejados para fases posteriores: firewall didatico completo, sensores reais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia.
+Ainda estao planejados para fases posteriores: firewall didatico completo, sensores adicionais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia mais completo.
 
 ## Componentes planejados
 
@@ -38,11 +40,12 @@ Ainda estao planejados para fases posteriores: firewall didatico completo, senso
 
 ## Bibliotecas e arquitetura
 
-O `platformio.ini` usa apenas o ambiente `esp32dev` com framework Arduino. As bibliotecas usadas nesta base sao as fornecidas pelo core Arduino-ESP32:
+O `platformio.ini` usa o ambiente `esp32dev` com framework Arduino. A base usa o core Arduino-ESP32 e a biblioteca do INA219:
 
 - `WiFi.h`;
 - `WebServer.h`;
-- FreeRTOS nativo do Arduino-ESP32.
+- FreeRTOS nativo do Arduino-ESP32;
+- `Adafruit INA219` para tensao, corrente e potencia via I2C.
 
 A arquitetura ainda esta concentrada em `src/main.cpp`, mas preserva separacao logica por funcoes e estruturas para Wi-Fi, web server, metricas, tasks, API e pagina de evidencias. Separar em modulos fisicos sera feito quando o volume de codigo justificar.
 
@@ -95,7 +98,30 @@ A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
 - `free_heap`;
 - `modules`.
 
-Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount` e `eventCapacity`.
+Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity` e o objeto `energy` com `available`, `bus_voltage_v`, `shunt_voltage_mv`, `current_ma`, `power_mw`, `last_update_ms` e `alert_status`.
+
+## INA219 e metricas de energia
+
+O INA219 e lido periodicamente pela task de metricas. As paginas e APIs usam um snapshot em memoria; requests HTTP nao fazem leitura direta no barramento I2C.
+
+Ligacao prevista no ESP32:
+
+- `VIN` do INA219 em `3V3` do ESP32;
+- `GND` do INA219 em `GND` comum;
+- `SDA` do INA219 em `GPIO 21`;
+- `SCL` do INA219 em `GPIO 22`;
+- entrada de medicao do INA219 em serie com a carga/fonte conforme o modulo usado na bancada.
+
+Metricas exibidas:
+
+- tensao do barramento em V;
+- tensao no shunt em mV;
+- corrente em mA;
+- potencia em mW;
+- ultimo update em `millis`;
+- estado de alerta.
+
+Se o INA219 nao for detectado no boot, o firmware continua funcionando, registra evento `WARN` e mostra Energia como `indisponivel`. Os thresholds de tensao baixa, corrente alta e potencia alta sao didaticos nesta fase e devem ser calibrados conforme a montagem real.
 
 ## API de eventos
 
@@ -121,4 +147,4 @@ As rotas `/demo/info`, `/demo/warn` e `/demo/security` geram eventos simulados e
 
 ## Evidencias
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). O visual atual usa identidade de mini SOC ciberfisico: tema escuro, cards de metricas, badges por status e timeline de eventos. A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
+O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn` e `/demo/security`.
