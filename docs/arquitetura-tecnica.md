@@ -116,3 +116,11 @@ O firmware possui a flag `NAT_EXPERIMENTAL_ENABLED` para tentar habilitar NAT/NA
 O snapshot NAT mantem `experimentalEnabled`, `supported`, `enabled`, `active`, `lastAttemptMs`, `lastStatus`, `lastError` e `note`. Esses dados aparecem em `/gateway`, `/evidencias` e `/api/status`.
 
 Se o core/lwIP nao tiver NAPT/IP forward linkavel, o sistema registra evento e mostra `nao suportado`. O fallback esperado e manter AP, painel, `/wifi` e demais rotas funcionando sem travar.
+
+## Traffic Monitor HTTP
+
+O Traffic Monitor v0.1 mantem um snapshot em RAM dos acessos HTTP ao painel. Ele contabiliza total de requisicoes, total de 404, hits em rotas sensiveis simuladas, eventos IDS, ultimo IP, ultima rota, User-Agent resumido e poucas rotas mais acessadas.
+
+A deteccao didatica de scan usa uma janela curta de 404 sucessivos e cooldown para evitar excesso de eventos. Quando a condicao e atingida, o firmware registra evento `SECURITY` com origem `IDS` e incrementa `suspicious_scan_count`.
+
+Esse monitor nao atua em modo promiscuo, nao faz sniffing de pacotes, nao inspeciona HTTPS e nao substitui IDS/IPS profissional. A PoC de NAT real em ESP-IDF fica separada da branch `main`; a `main` permanece como appliance/painel principal em Arduino `WebServer.h`.

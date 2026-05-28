@@ -1,0 +1,37 @@
+#pragma once
+
+#if __has_include("config.local.h")
+#include "config.local.h"
+#endif
+
+#if defined(UPSTREAM_WIFI_SSID) && !defined(NAT_POC_UPSTREAM_SSID)
+#define NAT_POC_UPSTREAM_SSID UPSTREAM_WIFI_SSID
+#endif
+
+#if defined(UPSTREAM_WIFI_PASSWORD) && !defined(NAT_POC_UPSTREAM_PASSPHRASE)
+#define NAT_POC_UPSTREAM_PASSPHRASE UPSTREAM_WIFI_PASSWORD
+#endif
+
+#ifndef NAT_POC_UPSTREAM_SSID
+#define NAT_POC_UPSTREAM_SSID "YOUR_UPSTREAM_WIFI"
+#endif
+
+#ifndef NAT_POC_UPSTREAM_PASSPHRASE
+#define NAT_POC_UPSTREAM_PASSPHRASE "YOUR_UPSTREAM_PASSWORD"
+#endif
+
+#ifndef NAT_POC_AP_SSID
+#define NAT_POC_AP_SSID "ESP32-NAT-POC"
+#endif
+
+#ifndef NAT_POC_AP_PASSPHRASE
+#define NAT_POC_AP_PASSPHRASE "natpoc123"
+#endif
+
+#ifndef NAT_POC_AP_CHANNEL
+#define NAT_POC_AP_CHANNEL 6
+#endif
+
+#ifndef NAT_POC_AP_MAX_CLIENTS
+#define NAT_POC_AP_MAX_CLIENTS 4
+#endif

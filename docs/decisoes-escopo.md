@@ -67,3 +67,9 @@ A decisao desta sprint e tentar NAT de forma experimental, sem transformar o pro
 O core instalado foi inspecionado localmente: ha headers de NAPT no lwIP, mas o `sdkconfig` do pacote nao habilita IP forward e a biblioteca precompilada pode nao exportar os simbolos NAPT. Por isso, o firmware trata suporte como condicional e documenta `nao suportado` quando necessario, em vez de quebrar o boot.
 
 NAT depende de upstream conectado, IP valido e suporte do core/lwIP. Mesmo quando ativo, desempenho e estabilidade sao limitados e nao substituem roteador/firewall profissional.
+
+## Traffic Monitor v0.1 na main
+
+A branch `main` passa a ter `/traffic`, `/api/traffic` e `/demo/scan` para reforcar a aparencia de mini appliance portatil de seguranca. A implementacao e propositalmente leve, em RAM, sem dependencia externa e baseada no `WebServer.h` sincronico ja usado pelo projeto.
+
+A decisao de escopo e nao implementar sniffing/promiscuous mode nesta sprint. O objetivo e demonstrar telemetria HTTP do painel, eventos IDS didaticos e logs persistentes, mantendo estabilidade do TDE. NAT real continua separado na PoC ESP-IDF.

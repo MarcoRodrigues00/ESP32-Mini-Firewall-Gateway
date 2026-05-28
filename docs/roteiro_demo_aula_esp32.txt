@@ -1,0 +1,299 @@
+ROTEIRO DE DEMONSTRAÇÃO EM AULA
+Projeto: ESP32 Mini Firewall Gateway / Monitor Ciberfísico
+Uso: abrir este arquivo no nano e seguir a ordem.
+
+
+# Entrar na pasta do projeto
+cd ~/Projetos/ESP32-Mini-Firewall-Gateway
+
+# Ver branch atual
+git branch --show-current
+
+# Ver se tem alteração pendente
+git status --short
+
+# Trocar para a branch principal
+git switch main
+
+# Compilar
+pio run
+
+# Gravar no ESP32
+pio run -t upload
+
+# Abrir monitor serial, se precisar
+pio device monitor -b 115200
+#smoketest
+python3 tools/smoke_test_http.py --base-url http://192.168.4.1
+
+cat evidencias/
+# Trocar para a branch experimental NAT
+git switch experiment/nat-router-poc
+
+# Compilar a PoC NAT
+pio run -d experiments/nat-router-poc
+
+# Gravar a PoC NAT no ESP32
+pio run -d experiments/nat-router-poc -t upload
+
+# Abrir monitor serial da PoC
+pio device monitor -d experiments/nat-router-poc -b 115200
+
+#Testar nat
+
+ip route
+ping -c 3 192.168.4.1
+ping -c 3 1.1.1.1
+
+#forcar dns
+sudo resolvectl dns wlp3s0 1.1.1.1 8.8.8.8
+sudo resolvectl domain wlp3s0 "~."
+ping -c 3 google.com
+
+#desfazer dns
+sudo resolvectl revert wlp3s0
+sudo systemctl restart NetworkManager
+
+============================================================
+1. OBJETIVO DA DEMO
+============================================================
+Mostrar que o projeto já saiu de um firmware simples e virou uma aplicação embarcada com:
+- painel web local no ESP32;
+- logs em RAM e logs persistentes em LittleFS;
+- firewall/IDS didático;
+- gateway AP+STA;
+- smoke test automatizado;
+- PoC separada provando NAT real no nível IP.
+
+Fala sugerida:
+"O foco é mostrar o progresso do projeto. A branch principal é a aplicação completa e estável. A branch experimental é uma prova de conceito separada para NAT real usando ESP-IDF."
+
+============================================================
+2. TECNOLOGIAS E LINGUAGENS USADAS
+============================================================
+Firmware principal:
+- C++ / Arduino Framework
+- PlatformIO
+- WebServer.h síncrono
+- FreeRTOS tasks
+- LittleFS para persistência de logs
+- HTML/CSS embarcado
+- APIs JSON
+
+PoC NAT experimental:
+- C / ESP-IDF
+- PlatformIO
+- lwIP com IP_FORWARD e IP_NAPT
+- DHCP server do AP
+- NAT/NAPT entre AP e STA
+
+Ferramentas auxiliares:
+- Python 3 para smoke test HTTP
+- Markdown para documentação
+- Mermaid para diagrama de arquitetura
+- Git para versionamento e branches
+
+============================================================
+3. O QUE EXISTE NA APLICAÇÃO PRINCIPAL
+============================================================
+Branch principal: main
+Wi-Fi criado pelo ESP32: ESP32-Firewall-Lab
+Endereço do painel: http://192.168.4.1
+
+Funcionalidades:
+- Dashboard local com status do firmware.
+- Página /demo com roteiro guiado.
+- Página /gateway com AP+STA, upstream e NAT experimental/fallback.
+- Página /wifi para configurar Wi-Fi upstream.
+- Página /logs para eventos.
+- API /api/status com status geral em JSON.
+- API /api/events com eventos em RAM.
+- API /api/events/persistent com logs persistentes.
+- Rotas demo: /demo/info, /demo/warn, /demo/security, /demo/flood, /demo/ids.
+- Smoke test automatizado em Python.
+
+============================================================
+4. O QUE TEM RELACIONADO A PERFORMANCE
+============================================================
+Mostrar no dashboard e na API:
+- uptime do firmware;
+- heap livre;
+- heap mínimo;
+- tamanho de flash;
+- tamanho do sketch;
+- tasks FreeRTOS;
+- tempos de execução de funções;
+- contadores de eventos;
+- status de módulos;
+- status de gateway e Wi-Fi;
+- smoke test validando rotas e APIs.
+
+Fala sugerida:
+"A aplicação mede o próprio estado de execução. Isso ajuda a defender desempenho e estabilidade, porque conseguimos observar heap, uptime, tasks, flash, logs e respostas HTTP."
+
+============================================================
+5. DEMO DA BRANCH PRINCIPAL
+============================================================
+Passo 1: voltar para a branch principal.
+
+Comandos:
+cd ~/Projetos/ESP32-Mini-Firewall-Gateway
+git switch main
+pio run -t upload
+
+Conectar no Wi-Fi:
+ESP32-Firewall-Lab
+
+Abrir:
+http://192.168.4.1/
+
+Mostrar:
+- Dashboard principal.
+- Firewall didático.
+- Gateway AP+STA.
+- Métricas do sistema.
+
+Fala sugerida:
+"Aqui está o painel local rodando dentro do ESP32. O notebook conecta diretamente no AP do ESP32 e acessa a aplicação sem servidor externo."
+
+============================================================
+6. DEMO GUIADA
+============================================================
+Abrir:
+http://192.168.4.1/demo
+
+Mostrar:
+- roteiro de apresentação dentro do próprio sistema;
+- botões de INFO, WARN, SECURITY, flood e IDS;
+- links para logs, APIs e persistência.
+
+Fala sugerida:
+"A tela /demo centraliza o roteiro para apresentação. Ela serve para qualquer colega conseguir demonstrar o projeto sem decorar rotas."
+
+============================================================
+7. GERAR EVENTOS E MOSTRAR LOGS
+============================================================
+Abrir em sequência:
+http://192.168.4.1/demo/warn
+http://192.168.4.1/demo/security
+http://192.168.4.1/demo/flood
+http://192.168.4.1/demo/ids
+
+Depois abrir:
+http://192.168.4.1/logs
+
+Mostrar:
+- eventos INFO;
+- eventos WARN;
+- eventos SECURITY;
+- flood didático;
+- IDS didático.
+
+Fala sugerida:
+"Os eventos são simulações controladas para demonstrar comportamento de segurança. Eles aparecem nos logs em RAM e os relevantes são persistidos."
+
+============================================================
+8. API E SMOKE TEST
+============================================================
+Abrir:
+http://192.168.4.1/api/status
+
+Mostrar:
+- JSON com gateway, firewall, IDS, NAT, storage e persistence.
+
+Depois rodar o smoke test:
+python3 tools/smoke_test_http.py --base-url http://192.168.4.1
+
+Mostrar PASS.
+
+Fala sugerida:
+"Além de print, temos validação automatizada. O smoke test chama rotas HTML, JSON e demos, e gera relatório Markdown."
+
+============================================================
+9. DEMO NAT EXPERIMENTAL
+============================================================
+Atenção: esta parte é uma PoC separada, não é a aplicação principal.
+
+Branch experimental:
+experiment/nat-router-poc
+
+Comandos:
+git switch experiment/nat-router-poc
+pio run -d experiments/nat-router-poc -t upload
+pio device monitor -d experiments/nat-router-poc -b 115200
+
+Hotspot do iPhone:
+Nome: NATTESTE
+Acesso Pessoal: ligado
+Maximizar Compatibilidade: ligado
+
+Wi-Fi criado pela PoC:
+ESP32-NAT-POC
+Credencial: natpoc123
+
+Mostrar no serial:
+- Build flags: IP_NAPT=1 IP_FORWARD=1
+- IP_EVENT_STA_GOT_IP
+- STA IP: 172.20.10.7
+- NAPT active=yes
+- AP clients=1
+
+Fala sugerida:
+"No Arduino principal o core não exportava NAPT. Por isso criamos uma PoC separada em ESP-IDF. Aqui o ESP32 conecta no hotspot e faz NAPT para o cliente conectado no AP dele."
+
+============================================================
+10. PROVA DO NAT
+============================================================
+Com o notebook conectado no Wi-Fi ESP32-NAT-POC:
+
+Comandos:
+ip route
+ping -c 3 192.168.4.1
+ping -c 3 1.1.1.1
+
+Esperado:
+- default via 192.168.4.1
+- ping 192.168.4.1 passa
+- ping 1.1.1.1 passa
+
+Fala sugerida:
+"O ping em 1.1.1.1 prova que o pacote saiu do notebook, passou pelo ESP32, foi traduzido por NAT e chegou na internet via hotspot."
+
+============================================================
+11. DNS: ESTADO ATUAL
+============================================================
+O NAT já funciona no nível IP.
+O DNS automático via DHCP ainda está em ajuste.
+
+Se precisar provar navegação por domínio:
+sudo resolvectl dns wlp3s0 1.1.1.1 8.8.8.8
+sudo resolvectl domain wlp3s0 "~."
+ping -c 3 google.com
+
+Fala sugerida:
+"Com DNS manual, google.com resolve e responde. Isso mostra que o NAT funciona; a pendência é automatizar a entrega de DNS via DHCP."
+
+Para desfazer o DNS manual:
+sudo resolvectl revert wlp3s0
+sudo systemctl restart NetworkManager
+
+============================================================
+12. COMO FECHAR A APRESENTAÇÃO
+============================================================
+Fala final sugerida:
+"Hoje o projeto tem uma aplicação principal estável com dashboard, logs, APIs, IDS didático e smoke test. Em paralelo, a PoC em ESP-IDF comprovou NAT real no nível IP. O próximo passo é finalizar DNS automático da PoC, decidir a integração e depois avançar para sensores físicos."
+
+============================================================
+13. CUIDADOS IMPORTANTES
+============================================================
+- Não commitar config.local.h.
+- Não mostrar credencial do hotspot em print.
+- Não prometer firewall profissional.
+- Explicar que IDS é didático.
+- Explicar que NAT real está em PoC separada.
+- Depois da demo NAT, voltar para main e regravar o firmware principal.
+
+Voltar para o firmware principal:
+git switch main
+pio run -t upload
+

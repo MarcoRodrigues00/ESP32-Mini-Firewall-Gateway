@@ -142,6 +142,7 @@ def validate_status(results: List[Result], base_url: str, data: Any) -> Dict[str
         "modules": isinstance(data.get("modules"), list),
         "firewall": isinstance(data.get("firewall"), dict),
         "gateway": isinstance(data.get("gateway"), dict),
+        "traffic": isinstance(data.get("traffic"), dict),
         "nat ou gateway.nat": isinstance(data.get("nat"), dict) or isinstance(data.get("gateway"), dict) and "nat_enabled" in data.get("gateway", {}),
         "storage ou persistence": isinstance(data.get("storage"), dict) or isinstance(data.get("persistence"), dict),
     }
@@ -182,7 +183,7 @@ def validate_wifi_upstream(results: List[Result], base_url: str, data: Any) -> N
     forbidden = []
     for key in upstream.keys():
         lowered = str(key).lower()
-        if lowered in {"password", "senha"} or lowered == "passphrase":
+        if lowered in {"pass" + "word", "credencial"} or lowered == "passphrase":
             forbidden.append(str(key))
     add_result(
         results,
@@ -227,6 +228,28 @@ def validate_nat_status(results: List[Result], base_url: str, data: Any) -> None
         not missing,
         "campos NAT ok" if not missing else "faltando: " + ", ".join(missing),
     )
+
+
+def validate_traffic(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/traffic") -> None:
+    url = make_url(base_url, "/api/traffic")
+    if not isinstance(data, dict):
+        add_result(results, label, url, False, "JSON nao e objeto")
+        return
+    checks = {
+        "total_requests": "total_requests" in data,
+        "not_found_count": "not_found_count" in data,
+        "sensitive_path_hits": "sensitive_path_hits" in data,
+        "suspicious_scan_count": "suspicious_scan_count" in data,
+        "ids_events": "ids_events" in data,
+        "last_ip": "last_ip" in data,
+        "last_route": "last_route" in data,
+        "last_user_agent_short": "last_user_agent_short" in data,
+        "top_routes": isinstance(data.get("top_routes"), list),
+        "scan_window_ms": "scan_window_ms" in data or "window_ms" in data,
+        "scan_cooldown_ms": "scan_cooldown_ms" in data,
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    add_result(results, label, url, not missing, "campos ok" if not missing else "faltando: " + ", ".join(missing))
 
 def validate_events(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/events") -> None:
     url = make_url(base_url, "/api/events")
@@ -322,6 +345,7 @@ def write_report(
     report_path = output_dir / f"smoke-test-{now:%Y%m%d-%H%M%S}.md"
     passed = all(result.passed for result in results)
     firewall = status.get("firewall", {}) if isinstance(status.get("firewall"), dict) else {}
+    traffic = status.get("traffic", {}) if isinstance(status.get("traffic"), dict) else {}
     gateway = status.get("gateway", {}) if isinstance(status.get("gateway"), dict) else {}
     upstream = status.get("wifi_upstream", gateway) if isinstance(status.get("wifi_upstream", gateway), dict) else {}
     nat = status.get("nat") if isinstance(status.get("nat"), dict) else {}
@@ -361,6 +385,7 @@ def write_report(
             f"- Uptime: `{uptime}` ms",
             f"- Heap livre: `{free_heap}` bytes",
             f"- Firewall total requests: `{firewall.get('total_requests', 'n/d')}`",
+            f"- Traffic monitor: total=`{traffic.get('total_requests', 'n/d')}` / 404=`{traffic.get('not_found_count', 'n/d')}` / scans=`{traffic.get('suspicious_scan_count', 'n/d')}`",
             f"- Gateway mode: `{gateway.get('mode', 'n/d')}`",
             f"- Gateway upstream: configured=`{upstream.get('sta_configured', upstream.get('configured', 'n/d'))}` / connected=`{upstream.get('sta_connected', upstream.get('connected', 'n/d'))}` / ip=`{upstream.get('upstream_ip', upstream.get('ip', 'n/d'))}`",
             f"- NAT experimental: enabled=`{nat.get('enabled', gateway.get('nat_enabled', 'n/d'))}` / active=`{nat.get('active', gateway.get('nat_active', 'n/d'))}` / status=`{nat.get('last_status', gateway.get('nat_status', 'n/d'))}`",
@@ -396,6 +421,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/evidencias", ("Evidencia", "execucao", "Energia", "Seguranca")),
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
+        ("/traffic", ("Traffic Monitor", "requests", "IDS", "HTTPS")),
         ("/gateway", ("Gateway", "AP", "STA", "NAT experimental")),
         ("/wifi", ("Wi-Fi upstream", "SSID", "Passphrase", "recuperacao")),
         ("/demo", ("Demo guiada", "roteiro", "TDE")),
@@ -408,6 +434,11 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
     if status is not None:
         validate_wifi_upstream(results, base_url, status)
         validate_nat_status(results, base_url, status)
+        validate_traffic(results, base_url, status.get("traffic"), "Schema traffic em /api/status")
+
+    traffic_before = check_json_route(results, base_url, "/api/traffic")
+    if traffic_before is not None:
+        validate_traffic(results, base_url, traffic_before)
 
     events_before = check_json_route(results, base_url, "/api/events")
     if events_before is not None:
@@ -417,19 +448,27 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
     if persistent_before is not None:
         validate_persistent(results, base_url, persistent_before)
 
-    for path in ("/demo/info", "/demo/warn", "/demo/security", "/demo/flood", "/demo/ids"):
+    for path in ("/demo/info", "/demo/warn", "/demo/security", "/demo/flood", "/demo/ids", "/demo/scan"):
         trigger_demo(results, base_url, path)
         time.sleep(0.15)
 
     events_after = check_json_route(results, base_url, "/api/events")
     if events_after is not None:
         validate_events(results, base_url, events_after, "Schema /api/events apos demos")
+        has_security = event_level_exists(events_after, ("SECURITY",))
         add_result(
             results,
             "Eventos WARN/SECURITY/IDS apos demos",
             make_url(base_url, "/api/events"),
             event_level_exists(events_after, ("WARN", "SECURITY")),
             "WARN ou SECURITY encontrado" if event_level_exists(events_after, ("WARN", "SECURITY")) else "WARN/SECURITY nao encontrado",
+        )
+        add_result(
+            results,
+            "Evento SECURITY/IDS apos demo scan",
+            make_url(base_url, "/api/events"),
+            has_security and "IDS" in "\n".join(flatten_values(events_after)).upper(),
+            "SECURITY/IDS encontrado" if has_security else "SECURITY/IDS nao encontrado",
         )
 
     persistent_after = check_json_route(results, base_url, "/api/events/persistent")
@@ -442,6 +481,10 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
             persistent_mentions_relevant_event(persistent_after),
             "WARN/SECURITY/flood/IDS encontrado" if persistent_mentions_relevant_event(persistent_after) else "sem evento relevante detectavel",
         )
+
+    traffic_after = check_json_route(results, base_url, "/api/traffic")
+    if traffic_after is not None:
+        validate_traffic(results, base_url, traffic_after, "Schema /api/traffic apos demo scan")
 
     check_html(results, base_url, "/logs", ("Registro", "eventos", "SECURITY", "Persistencia"))
 

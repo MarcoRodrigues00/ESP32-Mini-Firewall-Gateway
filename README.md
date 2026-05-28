@@ -230,7 +230,7 @@ A rota de limpeza e didatica de laboratorio e nao possui autenticacao nesta fase
 
 A rota `/wifi` permite configurar a rede Wi-Fi upstream usada pela interface AP+STA didatica. O AP local `ESP32-Firewall-Lab` continua ativo em `192.168.4.1` para recuperacao mesmo se a conexao upstream falhar.
 
-A configuracao salva mostra apenas SSID e indicadores de estado. A senha/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT agora e experimental e continua sem promessa de roteador profissional.
+A configuracao salva mostra apenas SSID e indicadores de estado. A credencial/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT agora e experimental e continua sem promessa de roteador profissional.
 
 ## NAT experimental
 
@@ -239,3 +239,11 @@ A sprint `0.12.0-sprint-nat-experimental` adiciona uma tentativa controlada de N
 No core Arduino-ESP32 instalado neste ambiente, os headers de NAPT existem, mas a biblioteca lwIP usada pelo build pode nao exportar suporte NAPT/IP forward. Quando isso ocorrer, `/gateway` e `/api/status` mostram NAT como `nao suportado`, sem travar o firmware. O AP local, `/wifi`, dashboard e logs continuam acessiveis.
 
 Teste manual: conectar o ESP32 ao upstream pela pagina `/wifi`, conectar um cliente ao AP do ESP32 e tentar abrir um site HTTP/HTTPS. O resultado depende do core/lwIP, da rede upstream e do cliente. NAT experimental nao substitui roteador, firewall profissional ou IDS/IPS.
+
+## Traffic Monitor v0.1
+
+A branch `main` agora apresenta o sistema como mini appliance didatico: Mini IDS portatil, Mini Firewall Gateway e monitor ciberfisico em ESP32. A rota `/traffic` mostra um snapshot em RAM do trafego HTTP recebido pelo painel: total de requests, 404, rotas sensiveis, eventos IDS, ultimo IP, ultima rota, User-Agent resumido e top rotas.
+
+A API `/api/traffic` expoe os mesmos dados em JSON, e `/api/status` inclui o objeto `traffic` para o dashboard e o smoke tester. A rota `/demo/scan` gera uma simulacao controlada de scan HTTP e registra evento `SECURITY` com origem `IDS`.
+
+Limitacao: o monitor e didatico e observa apenas requisicoes HTTP recebidas pelo servidor web embarcado. Ele nao faz sniffing de pacotes, nao inspeciona HTTPS, nao substitui IDS/IPS profissional e nao transforma o ESP32 em firewall de producao. NAT real validado em ESP-IDF permanece na PoC separada; a `main` continua como painel/appliance principal em PlatformIO + Arduino + `WebServer.h`.

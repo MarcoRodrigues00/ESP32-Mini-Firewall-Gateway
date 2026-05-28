@@ -1,0 +1,7 @@
+include/config.local.h
+.pio/
+build/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+sdkconfig.old

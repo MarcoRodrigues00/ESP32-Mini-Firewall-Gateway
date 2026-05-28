@@ -136,8 +136,14 @@ Depois de gerar eventos e confirmar que `/api/events/persistent` responde:
 
 O smoke test tambem valida a pagina `/wifi` e o schema de Wi-Fi upstream em `/api/status`. Ele verifica campos de estado como configurado, conectado, IP, RSSI, ultima tentativa, ultimo status e ultimo erro.
 
-O teste nao automatiza envio de credencial upstream. Isso evita colocar senha real em terminal, relatorio Markdown ou historico do projeto. A validacao da conexao real deve ser feita manualmente pela pagina `/wifi` quando o ESP32 estiver em bancada.
+O teste nao automatiza envio de credencial upstream. Isso evita colocar credencial real em terminal, relatorio Markdown ou historico do projeto. A validacao da conexao real deve ser feita manualmente pela pagina `/wifi` quando o ESP32 estiver em bancada.
 
 ## Validacao de NAT experimental
 
 O smoke test valida que `/gateway` menciona NAT experimental e que `/api/status` contem objeto `nat` ou campos NAT dentro de `gateway`. Ele verifica schema e status, mas nao exige que a internet funcione pelo AP porque isso depende do core/lwIP, do upstream e do ambiente fisico.
+
+## Validacao do Traffic Monitor
+
+O smoke tester valida a pagina `/traffic`, o JSON `/api/traffic`, a presenca do objeto `traffic` em `/api/status` e a rota `/demo/scan`. Depois da simulacao de scan, o script consulta `/api/events` para confirmar evento `SECURITY`/`IDS` e consulta `/api/traffic` novamente para validar o schema atualizado.
+
+O teste continua usando apenas Python standard library e nao executa ataque real. A rota `/demo/scan` e uma simulacao controlada sobre o HTTP do painel.

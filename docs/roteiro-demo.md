@@ -140,3 +140,12 @@ Fala sugerida: "Esta sprint tenta habilitar NAT experimental para clientes do AP
 Se aparecer `nao suportado`, explicar: "O firmware nao travou; ele detectou que o core/lwIP atual nao oferece NAPT linkavel. O AP local e o painel continuam funcionando."
 
 Teste manual, se houver suporte: conectar outro cliente ao AP `ESP32-Firewall-Lab` e tentar acessar um site HTTP/HTTPS. O resultado nao e prometido como roteador profissional.
+
+## Mostrar Traffic Monitor
+
+1. Abrir `/traffic`.
+2. Mostrar total de requests, top rotas, 404 suspeitos, rotas sensiveis, ultimo IP e User-Agent resumido.
+3. Acionar `/demo/scan`.
+4. Voltar para `/traffic` e `/logs` para mostrar o evento `SECURITY` com origem `IDS`.
+
+Fala sugerida: "Este monitor e didatico e observa apenas o HTTP do painel embarcado. Ele ajuda a explicar conceitos de IDS e scan sem prometer sniffing de pacotes, inspecao HTTPS ou substituicao de IDS profissional."

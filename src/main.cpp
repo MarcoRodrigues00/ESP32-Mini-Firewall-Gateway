@@ -31,6 +31,9 @@ constexpr unsigned long FIREWALL_SECURITY_COOLDOWN_MS = 30000UL;
 constexpr unsigned long WEB_ACCESS_EVENT_COOLDOWN_MS = 5000UL;
 constexpr unsigned long IDS_EVENT_COOLDOWN_MS = 30000UL;
 constexpr unsigned long IDS_404_EVENT_COOLDOWN_MS = 30000UL;
+constexpr unsigned long IDS_SCAN_WINDOW_MS = 15000UL;
+constexpr uint16_t IDS_SCAN_404_THRESHOLD = 5;
+constexpr unsigned long IDS_SCAN_COOLDOWN_MS = 30000UL;
 constexpr size_t EVENT_CAPACITY = 40;
 constexpr const char *PERSISTENT_EVENTS_PATH = "/events.log";
 constexpr const char *WIFI_CONFIG_PATH = "/wifi.json";
@@ -42,6 +45,7 @@ constexpr size_t EVENT_MESSAGE_SIZE = 72;
 constexpr size_t EVENT_VALUE_SIZE = 24;
 constexpr BaseType_t CORE_WEB = 1;
 constexpr BaseType_t CORE_BACKGROUND = 0;
+const char *WEB_HEADER_KEYS[] = {"User-Agent"};
 
 WebServer server(80);
 Adafruit_INA219 ina219;
@@ -51,6 +55,7 @@ SemaphoreHandle_t firewallMutex = nullptr;
 SemaphoreHandle_t gatewayMutex = nullptr;
 SemaphoreHandle_t wifiConfigMutex = nullptr;
 SemaphoreHandle_t natMutex = nullptr;
+SemaphoreHandle_t trafficMutex = nullptr;
 TaskHandle_t webServerTaskHandle = nullptr;
 TaskHandle_t metricsTaskHandle = nullptr;
 TaskHandle_t heartbeatTaskHandle = nullptr;
@@ -80,6 +85,7 @@ const ModuleInfo MODULES[] = {
     {"Gateway AP+STA", "ativo"},
     {"NAT experimental", "ativo"},
     {"IDS didatico", "ativo"},
+    {"Traffic Monitor HTTP", "ativo"},
     {"Sensores", "planejado"},
     {"Atuadores", "planejado"},
     {"Eventos em memoria", "ativo"},
@@ -159,6 +165,29 @@ struct NatSnapshot {
     char note[96];
 };
 
+struct TrafficRouteCounter {
+    char route[32];
+    uint32_t count;
+};
+
+struct TrafficSnapshot {
+    uint32_t totalRequests;
+    uint32_t notFoundCount;
+    uint32_t sensitivePathHits;
+    uint32_t suspiciousScanCount;
+    uint32_t idsEvents;
+    char lastIp[16];
+    char lastRoute[32];
+    char lastUserAgentShort[64];
+    TrafficRouteCounter topRoutes[6];
+    unsigned long scanWindowStartMs;
+    uint16_t scanWindow404Count;
+    unsigned long lastScanEventMs;
+    unsigned long scanWindowMs;
+    uint16_t scanThreshold;
+    unsigned long scanCooldownMs;
+};
+
 struct MetricsSnapshot {
     unsigned long uptimeSeconds;
     uint32_t freeHeap;
@@ -187,6 +216,7 @@ FirewallSnapshot firewallSnapshot = {true, 0, 0, "n/d", "n/d", 0, FIREWALL_FLOOD
 GatewaySnapshot gatewaySnapshot = {true, "ESP32-Firewall-Lab", "0.0.0.0", false, false, "nao configurado", "0.0.0.0", 0, 0, 0, 0, "AP_ONLY", false, false, "nao configurado", ""};
 WifiUpstreamConfig wifiConfig = {false, "", "", false};
 NatSnapshot natSnapshot = {NAT_EXPERIMENTAL_ENABLED, false, NAT_EXPERIMENTAL_ENABLED, false, 0, "inicializando", "", "NAT experimental depende de suporte NAPT no lwIP"};
+TrafficSnapshot trafficSnapshot = {0, 0, 0, 0, 0, "n/d", "n/d", "n/d", {}, 0, 0, 0, IDS_SCAN_WINDOW_MS, IDS_SCAN_404_THRESHOLD, IDS_SCAN_COOLDOWN_MS};
 EventRecord events[EVENT_CAPACITY] = {};
 bool ina219Available = false;
 bool littleFsAvailable = false;
@@ -391,6 +421,116 @@ FirewallSnapshot readFirewallSnapshot()
         xSemaphoreGive(firewallMutex);
     }
     return snapshot;
+}
+
+TrafficSnapshot readTrafficSnapshot()
+{
+    TrafficSnapshot snapshot = {0, 0, 0, 0, 0, "n/d", "n/d", "n/d", {}, 0, 0, 0, IDS_SCAN_WINDOW_MS, IDS_SCAN_404_THRESHOLD, IDS_SCAN_COOLDOWN_MS};
+    if (trafficMutex != nullptr && xSemaphoreTake(trafficMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snapshot = trafficSnapshot;
+        xSemaphoreGive(trafficMutex);
+    }
+    return snapshot;
+}
+
+void noteTrafficIdsEvent()
+{
+    if (trafficMutex != nullptr && xSemaphoreTake(trafficMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        if (trafficSnapshot.idsEvents < UINT32_MAX) {
+            ++trafficSnapshot.idsEvents;
+        }
+        xSemaphoreGive(trafficMutex);
+    }
+}
+
+void shortenText(char *target, size_t targetSize, const char *source)
+{
+    copyText(target, targetSize, source != nullptr && source[0] != '\0' ? source : "n/d");
+}
+
+void updateTrafficTopRoutes(TrafficSnapshot &snapshot, const char *route)
+{
+    size_t emptyIndex = sizeof(snapshot.topRoutes) / sizeof(snapshot.topRoutes[0]);
+    for (size_t index = 0; index < sizeof(snapshot.topRoutes) / sizeof(snapshot.topRoutes[0]); ++index) {
+        if (snapshot.topRoutes[index].route[0] == '\0') {
+            if (emptyIndex == sizeof(snapshot.topRoutes) / sizeof(snapshot.topRoutes[0])) {
+                emptyIndex = index;
+            }
+            continue;
+        }
+        if (std::strcmp(snapshot.topRoutes[index].route, route) == 0) {
+            if (snapshot.topRoutes[index].count < UINT32_MAX) {
+                ++snapshot.topRoutes[index].count;
+            }
+            return;
+        }
+    }
+
+    if (emptyIndex < sizeof(snapshot.topRoutes) / sizeof(snapshot.topRoutes[0])) {
+        copyText(snapshot.topRoutes[emptyIndex].route, sizeof(snapshot.topRoutes[emptyIndex].route), route);
+        snapshot.topRoutes[emptyIndex].count = 1;
+        return;
+    }
+
+    size_t minIndex = 0;
+    for (size_t index = 1; index < sizeof(snapshot.topRoutes) / sizeof(snapshot.topRoutes[0]); ++index) {
+        if (snapshot.topRoutes[index].count < snapshot.topRoutes[minIndex].count) {
+            minIndex = index;
+        }
+    }
+    copyText(snapshot.topRoutes[minIndex].route, sizeof(snapshot.topRoutes[minIndex].route), route);
+    snapshot.topRoutes[minIndex].count = 1;
+}
+
+bool recordTrafficSample(const char *route, const char *clientIp, const char *userAgent, bool notFound, bool sensitive)
+{
+    bool shouldLogScan = false;
+    const unsigned long now = millis();
+    if (trafficMutex != nullptr && xSemaphoreTake(trafficMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        if (trafficSnapshot.totalRequests < UINT32_MAX) {
+            ++trafficSnapshot.totalRequests;
+        }
+        if (notFound && trafficSnapshot.notFoundCount < UINT32_MAX) {
+            ++trafficSnapshot.notFoundCount;
+        }
+        if (sensitive && trafficSnapshot.sensitivePathHits < UINT32_MAX) {
+            ++trafficSnapshot.sensitivePathHits;
+        }
+        copyText(trafficSnapshot.lastIp, sizeof(trafficSnapshot.lastIp), clientIp);
+        copyText(trafficSnapshot.lastRoute, sizeof(trafficSnapshot.lastRoute), route);
+        shortenText(trafficSnapshot.lastUserAgentShort, sizeof(trafficSnapshot.lastUserAgentShort), userAgent);
+        updateTrafficTopRoutes(trafficSnapshot, route);
+
+        if (notFound) {
+            if (trafficSnapshot.scanWindowStartMs == 0 || now - trafficSnapshot.scanWindowStartMs > IDS_SCAN_WINDOW_MS) {
+                trafficSnapshot.scanWindowStartMs = now;
+                trafficSnapshot.scanWindow404Count = 1;
+            } else if (trafficSnapshot.scanWindow404Count < UINT16_MAX) {
+                ++trafficSnapshot.scanWindow404Count;
+            }
+            if (trafficSnapshot.scanWindow404Count >= IDS_SCAN_404_THRESHOLD &&
+                (trafficSnapshot.lastScanEventMs == 0 || now - trafficSnapshot.lastScanEventMs >= IDS_SCAN_COOLDOWN_MS)) {
+                shouldLogScan = true;
+                trafficSnapshot.lastScanEventMs = now;
+                if (trafficSnapshot.suspiciousScanCount < UINT32_MAX) {
+                    ++trafficSnapshot.suspiciousScanCount;
+                }
+            }
+        }
+        xSemaphoreGive(trafficMutex);
+    }
+    return shouldLogScan;
+}
+
+void registerTrafficAccess(const char *route, bool notFound = false, bool sensitive = false)
+{
+    char clientIp[16];
+    copyText(clientIp, sizeof(clientIp), server.client().remoteIP().toString().c_str());
+    const String userAgent = server.header("User-Agent");
+    if (recordTrafficSample(route, clientIp, userAgent.c_str(), notFound, sensitive)) {
+        noteTrafficIdsEvent();
+        addEvent("SECURITY", "IDS", "Possivel scan HTTP detectado", route);
+    }
 }
 
 GatewaySnapshot readGatewaySnapshot()
@@ -881,16 +1021,31 @@ String formattedFloat(float value, uint8_t decimals)
     return String(buffer);
 }
 
+const char *const SENSITIVE_PATHS[] = {
+    "/admin",
+    "/login",
+    "/wp-admin",
+    "/xmlrpc.php",
+    "/etc/passwd",
+    "/.env",
+    "/config",
+    "/phpmyadmin",
+};
+
 bool isSensitivePath(const char *route)
 {
-    return std::strstr(route, "/admin") != nullptr || std::strstr(route, "/login") != nullptr ||
-           std::strstr(route, "/wp-admin") != nullptr || std::strstr(route, "/etc/passwd") != nullptr ||
-           std::strstr(route, "/.env") != nullptr || std::strstr(route, "/config") != nullptr;
+    for (size_t index = 0; index < sizeof(SENSITIVE_PATHS) / sizeof(SENSITIVE_PATHS[0]); ++index) {
+        if (std::strstr(route, SENSITIVE_PATHS[index]) != nullptr) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void addIdsDemoEvent(const char *message, const char *value = nullptr)
 {
     noteIdsFinding(true, true);
+    noteTrafficIdsEvent();
     addEvent("SECURITY", "IDS", message, value);
 }
 
@@ -914,12 +1069,18 @@ void registerIdsNotFound(const char *route)
 
     noteIdsFinding(sensitive, sensitive);
     if (shouldLog) {
+        if (std::strcmp(level, "SECURITY") == 0) {
+            noteTrafficIdsEvent();
+        }
         addEvent(level, "IDS", message, route);
     }
 }
 
-void registerHttpAccess(const char *route, bool logAccessEvent = true)
+void registerHttpAccess(const char *route, bool logAccessEvent = true, bool trackTraffic = true)
 {
+    if (trackTraffic) {
+        registerTrafficAccess(route);
+    }
     char clientIp[16];
     copyText(clientIp, sizeof(clientIp), server.client().remoteIP().toString().c_str());
 
@@ -1136,6 +1297,69 @@ String buildEventsJson()
     return json;
 }
 
+void appendTrafficJsonObject(String &json, const TrafficSnapshot &traffic)
+{
+    json += "{\"total_requests\":";
+    json += traffic.totalRequests;
+    json += ",\"not_found_count\":";
+    json += traffic.notFoundCount;
+    json += ",\"sensitive_path_hits\":";
+    json += traffic.sensitivePathHits;
+    json += ",\"suspicious_scan_count\":";
+    json += traffic.suspiciousScanCount;
+    json += ",\"ids_events\":";
+    json += traffic.idsEvents;
+    json += ",\"last_ip\":\"";
+    appendJsonEscaped(json, traffic.lastIp);
+    json += "\",\"last_route\":\"";
+    appendJsonEscaped(json, traffic.lastRoute);
+    json += "\",\"last_user_agent_short\":\"";
+    appendJsonEscaped(json, traffic.lastUserAgentShort);
+    json += "\",\"window_ms\":";
+    json += traffic.scanWindowMs;
+    json += ",\"scan_window_ms\":";
+    json += traffic.scanWindowMs;
+    json += ",\"scan_window_404_count\":";
+    json += traffic.scanWindow404Count;
+    json += ",\"scan_threshold\":";
+    json += traffic.scanThreshold;
+    json += ",\"scan_cooldown_ms\":";
+    json += traffic.scanCooldownMs;
+    json += ",\"last_scan_event_ms\":";
+    json += traffic.lastScanEventMs;
+    json += ",\"top_route\":\"";
+    if (traffic.topRoutes[0].route[0] != '\0') {
+        appendJsonEscaped(json, traffic.topRoutes[0].route);
+    } else {
+        appendJsonEscaped(json, "n/d");
+    }
+    json += "\",\"top_routes\":[";
+    bool first = true;
+    for (size_t index = 0; index < sizeof(traffic.topRoutes) / sizeof(traffic.topRoutes[0]); ++index) {
+        if (traffic.topRoutes[index].route[0] == '\0') {
+            continue;
+        }
+        if (!first) {
+            json += ",";
+        }
+        json += "{\"route\":\"";
+        appendJsonEscaped(json, traffic.topRoutes[index].route);
+        json += "\",\"count\":";
+        json += traffic.topRoutes[index].count;
+        json += "}";
+        first = false;
+    }
+    json += "]}";
+}
+
+String buildTrafficJson()
+{
+    String json;
+    json.reserve(900);
+    appendTrafficJsonObject(json, readTrafficSnapshot());
+    return json;
+}
+
 void appendEventsTableHtml(String &html, size_t limit)
 {
     if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -1307,14 +1531,73 @@ String logsPage()
     return html;
 }
 
+String trafficPage()
+{
+    const TrafficSnapshot traffic = readTrafficSnapshot();
+    String html;
+    html.reserve(6200);
+    appendPageHead(html, "Traffic Monitor - ESP32 Mini Firewall Gateway");
+    appendHeader(html, "Traffic Monitor HTTP", "Monitoramento didatico do trafego HTTP recebido pelo painel embarcado.");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/api/traffic\">/api/traffic</a><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></div>");
+    html += F("<div class=\"panel\"><h2>Resumo de trafego</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total requests</strong><span>");
+    html += traffic.totalRequests;
+    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += traffic.notFoundCount;
+    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += traffic.sensitivePathHits;
+    html += F("</span></div><div class=\"metric\"><strong>Scans detectados</strong><span>");
+    html += traffic.suspiciousScanCount;
+    html += F("</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += traffic.idsEvents;
+    html += F("</span></div><div class=\"metric\"><strong>Janela IDS</strong><span>");
+    html += traffic.scanWindow404Count;
+    html += F("/");
+    html += traffic.scanThreshold;
+    html += F(" 404</span></div></div>");
+    if (traffic.suspiciousScanCount > 0) {
+        html += F("<p class=\"note\"><span class=\"badge security\">alerta</span> Scan HTTP didatico ja foi detectado nesta execucao.</p>");
+    } else {
+        html += F("<p class=\"note\">Nenhum scan didatico detectado nesta execucao.</p>");
+    }
+    html += F("</div>");
+    html += F("<div class=\"panel\"><h2>Ultimo acesso</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Ultimo IP</strong><span>");
+    appendHtmlEscaped(html, traffic.lastIp);
+    html += F("</span></div><div class=\"metric\"><strong>Ultima rota</strong><span>");
+    appendHtmlEscaped(html, traffic.lastRoute);
+    html += F("</span></div><div class=\"metric\"><strong>User-Agent resumido</strong><span>");
+    appendHtmlEscaped(html, traffic.lastUserAgentShort);
+    html += F("</span></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Top rotas acessadas</h2><div class=\"table-wrap\"><table><thead><tr><th>Rota</th><th>Requests</th></tr></thead><tbody>");
+    bool hasRoutes = false;
+    for (size_t index = 0; index < sizeof(traffic.topRoutes) / sizeof(traffic.topRoutes[0]); ++index) {
+        if (traffic.topRoutes[index].route[0] == '\0') {
+            continue;
+        }
+        hasRoutes = true;
+        html += F("<tr><td>");
+        appendHtmlEscaped(html, traffic.topRoutes[index].route);
+        html += F("</td><td>");
+        html += traffic.topRoutes[index].count;
+        html += F("</td></tr>");
+    }
+    if (!hasRoutes) {
+        html += F("<tr><td colspan=\"2\">n/d</td></tr>");
+    }
+    html += F("</tbody></table></div></div>");
+    html += F("<div class=\"panel tight\"><h2>Escopo</h2><p class=\"note\">Monitoramento didatico baseado no trafego HTTP do painel embarcado. Nao faz sniffing de pacotes, nao inspeciona HTTPS e nao substitui IDS/IPS profissional.</p></div>");
+    html += F("</main></body></html>");
+    return html;
+}
+
 String htmlPage()
 {
     String html;
     html.reserve(9200);
     appendPageHead(html, "ESP32 Mini Firewall Gateway");
-    appendHeader(html, PROJECT_NAME, "Monitor ciberfisico didatico em ESP32 para TDE academico.");
+    appendHeader(html, PROJECT_NAME, "Mini IDS portatil, Mini Firewall Gateway e monitor ciberfisico em ESP32 para laboratorio didatico de seguranca.");
     html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/wifi\">Wi-Fi</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
+    html += F("<div class=\"panel tight\"><h2>Traffic Monitor HTTP</h2><p class=\"note\"><a href=\"/traffic\">Abrir /traffic</a> para ver total de requests, top rotas, 404 suspeitos, rotas sensiveis e eventos IDS. Monitoramento didatico do HTTP do painel, sem sniffing de HTTPS.</p></div>");
     html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span id=\"idsEvents\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Modo</strong><span id=\"gwMode\">n/d</span></div><div class=\"metric\"><strong>Upstream</strong><span id=\"gwUpstream\">n/d</span></div><div class=\"metric\"><strong>Config upstream</strong><span id=\"gwConfigured\">n/d</span></div><div class=\"metric\"><strong>AP IP</strong><span id=\"gwApIp\">n/d</span></div><div class=\"metric\"><strong>IP upstream</strong><span id=\"gwUpIp\">n/d</span></div><div class=\"metric\"><strong>RSSI</strong><span id=\"gwRssi\">n/d</span></div><div class=\"metric\"><strong>Clientes AP</strong><span id=\"gwClients\">n/d</span></div><div class=\"metric\"><strong>Configurar</strong><span><a href=\"/wifi\">/wifi</a></span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Metricas do sistema</h2><div class=\"grid\"><div class=\"metric\"><strong>Heap livre</strong><span id=\"freeHeap\">n/d</span></div><div class=\"metric\"><strong>Heap minimo</strong><span id=\"minFreeHeap\">n/d</span></div><div class=\"metric\"><strong>Flash</strong><span id=\"flashSize\">n/d</span></div><div class=\"metric\"><strong>Sketch</strong><span id=\"sketchSize\">n/d</span></div></div></div>");
@@ -1323,7 +1606,7 @@ String htmlPage()
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Tasks FreeRTOS</h2><div class=\"table-wrap\"><table><thead><tr><th>Nome</th><th>Core</th><th>Status</th><th>Stack</th></tr></thead><tbody id=\"tasksTable\"><tr><td colspan=\"4\">n/d</td></tr></tbody></table></div></div>");
     html += F("<div class=\"panel\"><h2>Tempos de execucao</h2><div class=\"table-wrap\"><table><thead><tr><th>Funcao</th><th>Ultima medicao</th><th>Status</th></tr></thead><tbody id=\"timingsTable\"><tr><td colspan=\"3\">n/d</td></tr></tbody></table></div></div></div>");
     html += F("<div class=\"panel tight\"><h2>Registro de eventos</h2><p class=\"note\"><a href=\"/logs\">Abrir pagina de logs</a>. Eventos demo: <a href=\"/demo/info\">INFO</a>, <a href=\"/demo/warn\">WARN</a>, <a href=\"/demo/security\">SECURITY</a>, <a href=\"/demo/flood\">flood</a>, <a href=\"/demo/ids\">IDS</a>.</p></div>");
-    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('idsEvents').textContent=nz(f.ids_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderStorage(s){const el=document.getElementById('storageStatus');if(!el)return;s=s||{};el.innerHTML=badge(s.available?'ativo':'indisponivel');document.getElementById('storageSize').textContent=formatBytes(s.file_size);document.getElementById('storageMax').textContent=formatBytes(s.max_size);document.getElementById('storagePolicy').textContent=s.policy||'n/d'}function renderGateway(g){g=g||{};document.getElementById('gwMode').textContent=g.mode||'n/d';document.getElementById('gwUpstream').innerHTML=badge(g.sta_connected?'conectado':(g.sta_configured?'desconectado':'nao configurado'));document.getElementById('gwConfigured').textContent=g.sta_configured?'sim':'nao';document.getElementById('gwApIp').textContent=g.ap_ip||'n/d';document.getElementById('gwUpIp').textContent=g.sta_connected?(g.upstream_ip||'n/d'):'n/d';document.getElementById('gwRssi').textContent=g.sta_connected?nz(g.upstream_rssi)+' dBm':'n/d';document.getElementById('gwClients').textContent=nz(g.client_count)}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderGateway(d.gateway);renderStorage(d.storage||d.persistence);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
+    html += F("<script>function nz(v){return v===undefined||v===null?'n/d':v}function formatBytes(v){return typeof v==='number'&&v>0?v+' bytes':'n/d'}function fixed(v,d,u){return typeof v==='number'?v.toFixed(d)+' '+u:'n/d'}function badge(s){return '<span class=\"badge '+(s==='ativo'||s==='ativa'||s==='ok'||s==='detectado'||s==='normal'?'ok':'planned')+'\">'+s+'</span>'}function renderModules(items){const b=document.getElementById('modulesTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"2\">n/d</td></tr>';return}items.forEach(m=>{const r=document.createElement('tr');r.innerHTML='<td>'+m.name+'</td><td>'+badge(m.status)+'</td>';b.appendChild(r)})}function renderTasks(items){const b=document.getElementById('tasksTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"4\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+t.core+'</td><td>'+badge(t.status)+'</td><td>'+t.stackHighWatermark+'</td>';b.appendChild(r)})}function renderTimings(items){const b=document.getElementById('timingsTable');b.innerHTML='';if(!Array.isArray(items)||!items.length){b.innerHTML='<tr><td colspan=\"3\">n/d</td></tr>';return}items.forEach(t=>{const r=document.createElement('tr');r.innerHTML='<td>'+t.name+'</td><td>'+(t.measured?t.lastMicros+' us':'n/d')+'</td><td>'+badge(t.measured?'medida':'pendente')+'</td>';b.appendChild(r)})}function renderFirewall(f){f=f||{};document.getElementById('fwStatus').innerHTML=badge(f.enabled?'ativo':'indisponivel');document.getElementById('fwRequests').textContent=nz(f.total_requests);document.getElementById('fwSecurity').textContent=nz(f.security_events);document.getElementById('idsEvents').textContent=nz(f.ids_events);document.getElementById('fwRoute').textContent=f.last_route||'n/d';document.getElementById('fwIp').textContent=f.last_client_ip||'n/d';document.getElementById('fwRule').textContent=nz(f.flood_threshold)+' req / '+nz(f.flood_window_ms)+' ms'}function renderStorage(s){const el=document.getElementById('storageStatus');if(!el)return;s=s||{};el.innerHTML=badge(s.available?'ativo':'indisponivel');document.getElementById('storageSize').textContent=formatBytes(s.file_size);document.getElementById('storageMax').textContent=formatBytes(s.max_size);document.getElementById('storagePolicy').textContent=s.policy||'n/d'}function renderGateway(g){g=g||{};document.getElementById('gwMode').textContent=g.mode||'n/d';document.getElementById('gwUpstream').innerHTML=badge(g.sta_connected?'conectado':(g.sta_configured?'desconectado':'nao configurado'));document.getElementById('gwConfigured').textContent=g.sta_configured?'sim':'nao';document.getElementById('gwApIp').textContent=g.ap_ip||'n/d';document.getElementById('gwUpIp').textContent=g.sta_connected?(g.upstream_ip||'n/d'):'n/d';document.getElementById('gwRssi').textContent=g.sta_connected?nz(g.upstream_rssi)+' dBm':'n/d';document.getElementById('gwClients').textContent=nz(g.client_count);const n=document.getElementById('gwNat');if(n)n.innerHTML=badge(g.nat_active?'ativo':(g.nat_enabled?'fallback':'inativo'))}function renderTraffic(t){t=t||{};const set=(id,v)=>{const e=document.getElementById(id);if(e)e.textContent=v};set('trTotal',nz(t.total_requests));set('tr404',nz(t.not_found_count));set('trSensitive',nz(t.sensitive_path_hits));set('trScan',nz(t.suspicious_scan_count));set('trTop',t.top_route||'n/d');set('trLast',t.last_route||'n/d')}function renderEnergy(e){e=e||{};document.getElementById('energyStatus').innerHTML=badge(e.available?'detectado':'indisponivel');document.getElementById('energyVoltage').textContent=e.available?fixed(e.bus_voltage_v,2,'V'):'n/d';document.getElementById('energyCurrent').textContent=e.available?fixed(e.current_ma,1,'mA'):'n/d';document.getElementById('energyPower').textContent=e.available?fixed(e.power_mw,1,'mW'):'n/d';document.getElementById('energyUpdated').textContent=e.available?nz(e.last_update_ms)+' ms':'n/d';document.getElementById('energyAlert').innerHTML=badge(e.alert_status||'sensor indisponivel')}async function refreshStatus(){try{const res=await fetch('/api/status');const d=await res.json();const ev=nz(d.eventCount)+'/'+nz(d.eventCapacity);document.getElementById('status').innerHTML=badge(d.status||'n/d');document.getElementById('apIp').textContent=d.apIp||d.ip||'n/d';document.getElementById('uptime').textContent=nz(d.uptimeSeconds)+'s';document.getElementById('eventCount').textContent=ev;document.getElementById('freeHeap').textContent=formatBytes(d.freeHeap);document.getElementById('minFreeHeap').textContent=formatBytes(d.minFreeHeap);document.getElementById('flashSize').textContent=formatBytes(d.flashSize);document.getElementById('sketchSize').textContent=formatBytes(d.sketchSize);renderFirewall(d.firewall);renderGateway(d.gateway);renderTraffic(d.traffic);renderStorage(d.storage||d.persistence);renderEnergy(d.energy);renderModules(d.modules);renderTasks(d.tasks);renderTimings(d.functionTimings)}catch(e){document.getElementById('status').textContent='erro'}}refreshStatus();</script>");
     html += F("</main></body></html>");
     return html;
 }
@@ -1362,9 +1645,11 @@ String demoPage()
     html += F("<tr><td>5</td><td>Gerar evento SECURITY</td><td><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a></td></tr>");
     html += F("<tr><td>6</td><td>Simular flood HTTP</td><td><a class=\"btn security\" href=\"/demo/flood\">Simular flood</a></td></tr>");
     html += F("<tr><td>7</td><td>Simular IDS</td><td><a class=\"btn security\" href=\"/demo/ids\">Simular IDS</a></td></tr>");
-    html += F("<tr><td>8</td><td>Ver logs em RAM</td><td><a class=\"btn\" href=\"/logs\">Abrir logs</a></td></tr>");
-    html += F("<tr><td>9</td><td>Ver logs persistentes</td><td><a class=\"btn\" href=\"/api/events/persistent\">Abrir JSON persistente</a></td></tr>");
-    html += F("<tr><td>10</td><td>Validar com smoke tester externo</td><td><code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code></td></tr>");
+    html += F("<tr><td>8</td><td>Simular scan basico</td><td><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></td></tr>");
+    html += F("<tr><td>9</td><td>Abrir Traffic Monitor</td><td><a class=\"btn\" href=\"/traffic\">Abrir /traffic</a></td></tr>");
+    html += F("<tr><td>10</td><td>Ver logs em RAM</td><td><a class=\"btn\" href=\"/logs\">Abrir logs</a></td></tr>");
+    html += F("<tr><td>11</td><td>Ver logs persistentes</td><td><a class=\"btn\" href=\"/api/events/persistent\">Abrir JSON persistente</a></td></tr>");
+    html += F("<tr><td>12</td><td>Validar com smoke tester externo</td><td><code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code></td></tr>");
     html += F("</tbody></table></div></div>");
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Como apresentar</h2><ul><li>Primeiro mostro o painel local do ESP32.</li><li>Depois mostro o gateway didatico e o AP.</li><li>Em seguida simulo eventos de seguranca.</li><li>Os eventos aparecem em RAM e nos logs persistentes.</li><li>Por fim, executo o smoke test para validar as rotas.</li></ul></div>");
     html += F("<div class=\"panel\"><h2>Limitacoes</h2><ul><li>NAT/roteamento real nao implementado nesta fase.</li><li>IDS e didatico e baseado em HTTP do painel.</li><li>Nao inspeciona HTTPS.</li><li>Sensores fisicos ficam para fase final.</li><li>INA219 esta preparado no firmware, mas teste fisico depende de montagem/solda.</li></ul></div></div>");
@@ -1696,6 +1981,10 @@ String buildStatusJson()
     json += "}";
     json += ",\"gateway\":";
     appendGatewayJson(json);
+    json += ",\"nat\":";
+    appendNatJson(json);
+    json += ",\"traffic\":";
+    appendTrafficJsonObject(json, readTrafficSnapshot());
     json += ",\"wifi_upstream\":";
     appendWifiUpstreamJson(json);
     json += ",\"storage\":";
@@ -1798,6 +2087,12 @@ void handleEventsApi()
     server.send(200, "application/json", buildEventsJson());
 }
 
+void handleTrafficApi()
+{
+    registerHttpAccess("/api/traffic");
+    server.send(200, "application/json", buildTrafficJson());
+}
+
 void handleEvidences()
 {
     const uint32_t startMicros = micros();
@@ -1810,6 +2105,12 @@ void handleLogs()
 {
     registerHttpAccess(server.uri().c_str());
     server.send(200, "text/html; charset=utf-8", logsPage());
+}
+
+void handleTraffic()
+{
+    registerHttpAccess("/traffic");
+    server.send(200, "text/html; charset=utf-8", trafficPage());
 }
 
 void redirectToLogs()
@@ -1856,6 +2157,25 @@ void handleDemoIds()
 {
     registerHttpAccess("/demo/ids");
     addIdsDemoEvent("Simulacao controlada de assinatura IDS", "assinatura didatica");
+    redirectToLogs();
+}
+
+void handleDemoScan()
+{
+    registerHttpAccess("/demo/scan");
+    const char *paths[] = {"/admin", "/login", "/wp-admin", "/xmlrpc.php", "/etc/passwd", "/phpmyadmin"};
+    char clientIp[16];
+    copyText(clientIp, sizeof(clientIp), server.client().remoteIP().toString().c_str());
+    bool scanLogged = false;
+    for (size_t index = 0; index < sizeof(paths) / sizeof(paths[0]); ++index) {
+        const bool sensitive = isSensitivePath(paths[index]);
+        if (recordTrafficSample(paths[index], clientIp, "demo-scan/1.0", true, sensitive)) {
+            scanLogged = true;
+        }
+        noteIdsFinding(true, sensitive);
+    }
+    noteTrafficIdsEvent();
+    addEvent("SECURITY", "IDS", scanLogged ? "Possivel scan HTTP detectado" : "Simulacao controlada de scan HTTP", "demo scan");
     redirectToLogs();
 }
 
@@ -1928,7 +2248,9 @@ void handleWifiReconnect()
 void handleNotFound()
 {
     const String route = server.uri();
-    registerHttpAccess(route.c_str(), false);
+    const bool sensitive = isSensitivePath(route.c_str());
+    registerTrafficAccess(route.c_str(), true, sensitive);
+    registerHttpAccess(route.c_str(), false, false);
     registerIdsNotFound(route.c_str());
     server.send(404, "text/plain; charset=utf-8", "Rota nao encontrada");
 }
@@ -2021,12 +2343,15 @@ void setupAccessPoint()
 
 void setupWebServer()
 {
+    server.collectHeaders(WEB_HEADER_KEYS, sizeof(WEB_HEADER_KEYS) / sizeof(WEB_HEADER_KEYS[0]));
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/events", HTTP_GET, handleEventsApi);
+    server.on("/api/traffic", HTTP_GET, handleTrafficApi);
     server.on("/api/events/persistent", HTTP_GET, handlePersistentEventsApi);
     server.on("/evidencias", HTTP_GET, handleEvidences);
     server.on("/gateway", HTTP_GET, handleGateway);
+    server.on("/traffic", HTTP_GET, handleTraffic);
     server.on("/wifi", HTTP_GET, handleWifiPage);
     server.on("/wifi/save", HTTP_POST, handleWifiSave);
     server.on("/wifi/clear", HTTP_GET, handleWifiClear);
@@ -2041,6 +2366,7 @@ void setupWebServer()
     server.on("/demo/security", HTTP_GET, handleDemoSecurity);
     server.on("/demo/flood", HTTP_GET, handleDemoFlood);
     server.on("/demo/ids", HTTP_GET, handleDemoIds);
+    server.on("/demo/scan", HTTP_GET, handleDemoScan);
     server.onNotFound(handleNotFound);
     server.begin();
 
@@ -2105,6 +2431,7 @@ void setup()
     gatewayMutex = xSemaphoreCreateMutex();
     wifiConfigMutex = xSemaphoreCreateMutex();
     natMutex = xSemaphoreCreateMutex();
+    trafficMutex = xSemaphoreCreateMutex();
     updateNatSnapshot(false, 0, "inicializando", "", "NAT experimental depende de suporte NAPT no lwIP");
     setupPersistentStorage();
     loadWifiConfigFile();

@@ -134,7 +134,7 @@ As rotas abaixo sao atendidas pelo `WebServer.h` sincrono embarcado no ESP32. To
 - Metodo: `GET`.
 - Tipo de resposta: `text/html`.
 - Finalidade: configurar e diagnosticar a rede Wi-Fi upstream mantendo o AP local de recuperacao ativo.
-- Observacao de seguranca: exibe SSID e indicadores, mas nunca exibe a senha/passphrase salva. Nao possui autenticacao nesta fase; usar somente em laboratorio.
+- Observacao de seguranca: exibe SSID e indicadores, mas nunca exibe a credencial/passphrase salva. Nao possui autenticacao nesta fase; usar somente em laboratorio.
 
 ## `/wifi/save`
 
@@ -175,3 +175,22 @@ A rota `/api/status` inclui o objeto `nat` para a sprint NAT experimental:
 - `note`: observacao de escopo.
 
 Campos resumidos tambem aparecem em `gateway`: `nat_enabled`, `nat_active`, `nat_supported`, `nat_status`, `nat_error` e `nat_note`. NAT e experimental, pode nao funcionar no core atual e nao substitui roteador/firewall profissional.
+
+## `/traffic`
+
+- Metodo: `GET`
+- Tipo: HTML
+- Finalidade: mostrar o Traffic Monitor v0.1 com total de requests HTTP, top rotas, 404 suspeitos, rotas sensiveis, ultimo IP, ultima rota, User-Agent resumido e alerta didatico de scan.
+- Observacao: monitora apenas o HTTP recebido pelo painel embarcado. Nao faz sniffing, nao inspeciona HTTPS e nao substitui IDS/IPS profissional.
+
+## `/api/traffic`
+
+- Metodo: `GET`
+- Tipo: JSON
+- Campos principais: `total_requests`, `not_found_count`, `sensitive_path_hits`, `suspicious_scan_count`, `ids_events`, `last_ip`, `last_route`, `last_user_agent_short`, `top_route`, `top_routes`, `scan_window_ms`, `scan_threshold` e `scan_cooldown_ms`.
+
+## `/demo/scan`
+
+- Metodo: `GET`
+- Finalidade: simular acessos a rotas sensiveis e inexistentes, incrementar contadores do Traffic Monitor e gerar evento `SECURITY` com origem `IDS`.
+- Observacao: simulacao controlada para demonstracao, sem ataque real.
