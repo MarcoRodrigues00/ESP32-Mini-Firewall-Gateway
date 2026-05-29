@@ -82,6 +82,20 @@ Checks no rodape do display:
 
 `/api/status`, dashboard `/` e `/report` mostram `display.enabled`, `display.available`, `display.state` e `display.last_update_ms`.
 
+## QA de bancada e evidencias
+
+Roteiros especificos da v2:
+
+- Checklist de validacao real: [`docs/espidf-v2-bench-qa.md`](../../docs/espidf-v2-bench-qa.md).
+- Guia de evidencias: [`docs/espidf-v2-evidence-guide.md`](../../docs/espidf-v2-evidence-guide.md).
+- Template de resultado: [`evidencias/espidf-v2-bench-result-template.md`](../../evidencias/espidf-v2-bench-result-template.md).
+
+Smoke HTTP leve, sem dependencia externa, para executar conectado ao AP:
+
+```bash
+python3 tools/smoke_espidf_v2_http.py --base-url http://192.168.4.1
+```
+
 ## Build
 
 ```bash
