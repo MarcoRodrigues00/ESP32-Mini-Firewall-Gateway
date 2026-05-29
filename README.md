@@ -189,6 +189,14 @@ Comando basico:
 python3 tools/smoke_test_http.py --base-url http://192.168.4.1
 ```
 
+## Validacao offline via SSH
+
+Para validar build, rotas registradas, smoke tester, documentacao minima e riscos basicos sem conectar o notebook ao AP do ESP32, use o offline check descrito em [docs/offline-check.md](docs/offline-check.md).
+
+```bash
+python3 tools/offline_project_check.py
+```
+
 ## Documentacao tecnica da sprint
 
 Documentos de apoio para arquitetura, defesa e escopo:
