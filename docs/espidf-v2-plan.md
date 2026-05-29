@@ -20,6 +20,7 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - `/traffic`, `/logs` e `/report` em HTML local sem CDN; `/traffic` compensa a filtragem dos logs mostrando total requests, DNS queries, clientes observados e top routes.
 - Rotas sensíveis didáticas: `/admin`, `/login`, `/wp-admin`, `/etc/passwd`, `/api`, `/config` e `/debug`.
 - Rotas de demo: `/demo`, `/demo/scan`, `/demo/security` e `/demo/info`.
+- Display local opcional atras de `APPLIANCE_V2_ENABLE_DISPLAY`, com estado visual NORMAL/DNS suspeito/ATTACK e checks UP/NAT/IDS.
 
 ## Hardening de estabilidade
 
@@ -37,7 +38,7 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - `experiments/nat-router-poc` não é alterado.
 - Não há credenciais reais versionadas.
 - `include/config.local.h` permanece ignorado.
-- `/api/status` continua retornando JSON válido, com `traffic.top_routes` como array, `traffic.last_route` presente mesmo vazio, `time.synced`, `time.timestamp`, `dns.total_queries`, `dns.last_domain`, `dns.last_client`, `dns.monitoring_enabled`, `clients_observed.*` e `ids.*`.
+- `/api/status` continua retornando JSON válido, com `traffic.top_routes` como array, `traffic.last_route` presente mesmo vazio, `time.synced`, `time.timestamp`, `dns.total_queries`, `dns.last_domain`, `dns.last_client`, `dns.monitoring_enabled`, `clients_observed.*`, `ids.*` e `display.*`.
 - A dashboard não imprime senha da STA nem senha do AP.
 
 ## Teste de bancada posterior
@@ -55,7 +56,8 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 11. Conferir `/clients` e `/api/clients` após navegação DNS para validar cliente, contadores, último domínio, score e classificação.
 12. Conferir `/traffic`, `/logs`, `/report`, `/dns` e `/api`.
 13. Confirmar no log serial se persiste o aviso `Expected 4MB, found 2MB`; se persistir, validar a flash real do módulo antes de mudar `platformio.ini`.
-14. Registrar evidências de tela, serial e JSON.
+14. Se o controlador/pinout do display estiverem confirmados, habilitar `APPLIANCE_V2_ENABLE_DISPLAY` em `include/config.local.h`, conferir tela NORMAL no boot e repetir os eventos de DNS suspeito/ATTACK observando o cooldown visual.
+15. Registrar evidências de tela, serial e JSON.
 
 ## Limitações planejadas
 
@@ -70,3 +72,18 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - Proxy DNS é mínimo, experimental e de melhor esforço; a sprint cobre consultas A/AAAA simples e detecção por lista didática, sem bloqueio.
 - Eventos são RAM-only e filtrados para não registrar polling normal de `/`, `/api/status`, `/api/events`, `/api/dns`, `/logs`, `/traffic`, `/dns` e `/report`.
 - Flash mismatch `Expected 4MB, found 2MB` é pendência de bancada; não mexer em flash size nem partições até confirmação física.
+- Display local permanece desabilitado por padrao ate confirmar controlador e pinout do modulo real; falha de inicializacao nao deve derrubar AP/NAT/DNS/HTTP.
+
+## Display local opcional
+
+A camada de display foi adicionada como recurso defensivo para o mini appliance visual. Como o repositorio ainda nao possui pinout/controlador confiavel do ESP32 com tela integrada, `APPLIANCE_V2_ENABLE_DISPLAY` fica `0` por padrao em `config.example.h`/`config.h`.
+
+Quando habilitado em `include/config.local.h`, a camada tenta inicializar SPI com driver leve ST7789 ou ILI9341 e desenha direto, sem framebuffer grande. Se pinos, driver ou SPI falharem, `display.available=false` e o restante da PoC continua operacional.
+
+Estados e cooldowns:
+
+- `DISPLAY_STATE_NORMAL`: sem dominio suspeito recente, sem sinal de ataque recente e maior score abaixo de 15.
+- `DISPLAY_STATE_SUSPICIOUS_DNS`: ultimo dominio suspeito dentro de 5 minutos.
+- `DISPLAY_STATE_ATTACK`: burst DNS, evento HTTP `SECURITY` recente ou maior `risk_score >= 15`; eventos recentes seguram o estado por ate 60 segundos.
+
+A tela mostra hora SNTP quando sincronizada, quantidade de clientes, maior score e ultimo dominio suspeito quando couber. Os checks `UP`, `NAT` e `IDS` usam verde/amarelo/vermelho/cinza para resumir upstream, NAT e estado do IDS localmente.

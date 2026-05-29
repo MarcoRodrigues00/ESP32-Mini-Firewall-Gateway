@@ -17,6 +17,7 @@ PoC isolada para unir NAT/NAPT real em ESP-IDF com um dashboard HTTP demonstráv
 - Camada IDS de metadados v0.3 com clientes observados em RAM, contagem DNS por cliente, domínios únicos aproximados, burst DNS e score didático.
 - Lista didática de domínios suspeitos: `malware.test`, `phishing.test`, `suspicious.test` e `bad.example`.
 - Dashboard local sem CDN.
+- Display local opcional atras de feature flag, para estado visual do appliance quando o driver/pinout forem confirmados.
 
 ## Configuração local
 
@@ -28,6 +29,42 @@ Copie `include/config.example.h` para `include/config.local.h` e ajuste a rede u
 ```
 
 `include/config.local.h` é ignorado pelo Git e não deve ser versionado.
+
+## Display local opcional
+
+A v2 tem uma camada defensiva de display local, desabilitada por padrao porque o controlador e o pinout do ESP32 com tela integrada ainda nao foram confirmados no repositorio. Sem configuracao explicita, o firmware mantem AP, NAT, DNS e HTTP funcionando como antes.
+
+Para testar em bancada, preencha apenas em `include/config.local.h`:
+
+```c
+#define APPLIANCE_V2_ENABLE_DISPLAY 1
+#define APPLIANCE_V2_DISPLAY_WIDTH 240
+#define APPLIANCE_V2_DISPLAY_HEIGHT 240
+#define APPLIANCE_V2_DISPLAY_DRIVER APPLIANCE_V2_DISPLAY_DRIVER_ST7789
+#define APPLIANCE_V2_DISPLAY_PIN_MOSI 23
+#define APPLIANCE_V2_DISPLAY_PIN_MISO -1
+#define APPLIANCE_V2_DISPLAY_PIN_SCLK 18
+#define APPLIANCE_V2_DISPLAY_PIN_CS 5
+#define APPLIANCE_V2_DISPLAY_PIN_DC 16
+#define APPLIANCE_V2_DISPLAY_PIN_RST 17
+#define APPLIANCE_V2_DISPLAY_PIN_BL 4
+```
+
+Os drivers leves previstos sao `APPLIANCE_V2_DISPLAY_DRIVER_ST7789` e `APPLIANCE_V2_DISPLAY_DRIVER_ILI9341`, ambos via SPI do ESP-IDF. Os pinos acima sao exemplo e nao devem ser usados sem conferir o modulo real. Se algum pino obrigatorio ficar `-1` ou o SPI falhar, o display fica `available=false` e o firmware continua rodando.
+
+Estados visuais:
+
+- `NORMAL`: sem DNS suspeito recente, sem ataque recente e maior `risk_score` abaixo de 15.
+- `SUSPICIOUS_DNS`: dominio suspeito observado nos ultimos 5 minutos; mostra `DNS SUS` e o ultimo dominio abreviado.
+- `ATTACK`: evento `SECURITY` HTTP, burst DNS recente ou maior `risk_score >= 15`; o estado fica retido por ate 60 segundos quando vem de evento recente.
+
+Checks no rodape do display:
+
+- `UP`: verde com STA conectado/IP, amarelo reconectando, vermelho se configurado e indisponivel, cinza se sem upstream configurado.
+- `NAT`: verde com `nat.active=true`, amarelo aguardando upstream, vermelho se tentou e falhou com upstream conectado, cinza quando ainda nao tentou.
+- `IDS`: verde normal, amarelo em `SUSPICIOUS_DNS`, vermelho em `ATTACK`.
+
+`/api/status`, dashboard `/` e `/report` mostram `display.enabled`, `display.available`, `display.state` e `display.last_update_ms`.
 
 ## Build
 

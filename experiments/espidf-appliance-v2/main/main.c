@@ -27,6 +27,10 @@
 #include "lwip/sockets.h"
 #include "nvs_flash.h"
 #include "dhcpserver/dhcpserver.h"
+#if APPLIANCE_V2_ENABLE_DISPLAY
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
+#endif
 
 #define AP_IP_A 192
 #define AP_IP_B 168
@@ -60,6 +64,40 @@
 #define IDS_DNS_BURST_COOLDOWN_MS 60000ULL
 #define IDS_UNIQUE_DOMAIN_THRESHOLD 8U
 #define IDS_RISK_MAX 100U
+#define DISPLAY_SUSPICIOUS_HOLD_MS 300000ULL
+#define DISPLAY_ATTACK_HOLD_MS 60000ULL
+#define DISPLAY_REFRESH_MIN_MS 1000ULL
+#define DISPLAY_DOMAIN_LABEL_LEN 32
+
+typedef enum {
+    DISPLAY_STATE_NORMAL = 0,
+    DISPLAY_STATE_SUSPICIOUS_DNS,
+    DISPLAY_STATE_ATTACK
+} display_state_t;
+
+typedef enum {
+    DISPLAY_BOX_OFF = 0,
+    DISPLAY_BOX_OK,
+    DISPLAY_BOX_WARN,
+    DISPLAY_BOX_ALERT
+} display_box_state_t;
+
+typedef struct {
+    display_state_t state;
+    display_box_state_t upstream_box;
+    display_box_state_t nat_box;
+    display_box_state_t ids_box;
+    bool upstream_configured;
+    bool upstream_connecting;
+    bool upstream_connected;
+    bool nat_attempted;
+    bool nat_active;
+    uint16_t client_count;
+    uint8_t highest_risk_score;
+    char last_suspicious_domain[DISPLAY_DOMAIN_LABEL_LEN];
+    char clock_label[8];
+} display_snapshot_t;
+
 
 typedef struct {
     uint32_t id;
@@ -175,6 +213,22 @@ static uint8_t last_disconnect_reason = 0;
 static char upstream_ip[16] = "0.0.0.0";
 static char upstream_gw[16] = "0.0.0.0";
 static char upstream_netmask[16] = "0.0.0.0";
+static bool display_available = false;
+static uint64_t display_last_update_ms = 0;
+static uint64_t display_last_suspicious_ms = 0;
+static uint64_t display_last_attack_ms = 0;
+static char display_last_suspicious_domain[DISPLAY_DOMAIN_LABEL_LEN] = "";
+static display_state_t display_current_state = DISPLAY_STATE_NORMAL;
+#if APPLIANCE_V2_ENABLE_DISPLAY
+static spi_device_handle_t display_spi = NULL;
+#endif
+
+
+
+static uint64_t uptime_ms(void);
+static uint16_t get_client_count(void);
+static void ids_summary_locked(uint32_t *active_clients, uint8_t *highest_score, char *highest_client, size_t highest_client_len, char *last_domain, size_t last_domain_len);
+static void add_event(const char *level, const char *source, const char *fmt, ...);
 
 static const char *html_style =
     "body{font-family:Arial,sans-serif;margin:0;background:#f5f7fa;color:#17202a}"
@@ -190,6 +244,496 @@ static const char *html_style =
     "table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9e2ec}"
     "td,th{padding:8px;border-bottom:1px solid #e4e7eb;text-align:left;font-size:14px}"
     "code{background:#e4e7eb;padding:2px 4px;border-radius:4px}pre{white-space:pre-wrap;background:#fff;border:1px solid #d9e2ec;padding:12px}";
+
+
+static const char *display_state_name(display_state_t state)
+{
+    switch (state) {
+    case DISPLAY_STATE_ATTACK:
+        return "ATTACK";
+    case DISPLAY_STATE_SUSPICIOUS_DNS:
+        return "SUSPICIOUS_DNS";
+    case DISPLAY_STATE_NORMAL:
+    default:
+        return "NORMAL";
+    }
+}
+
+static void display_format_clock(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return;
+    }
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    if (!time_synchronized || timeinfo.tm_year < (2023 - 1900)) {
+        strlcpy(out, "--:--", out_len);
+        return;
+    }
+    strftime(out, out_len, "%H:%M", &timeinfo);
+}
+
+static void display_note_suspicious_dns(const char *domain, uint64_t now_ms)
+{
+    display_last_suspicious_ms = now_ms;
+    if (domain != NULL && domain[0] != '\0') {
+        strlcpy(display_last_suspicious_domain, domain, sizeof(display_last_suspicious_domain));
+    }
+}
+
+static void display_note_attack(uint64_t now_ms)
+{
+    display_last_attack_ms = now_ms;
+}
+
+static void compute_display_state(display_snapshot_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->state = DISPLAY_STATE_NORMAL;
+    out->upstream_box = DISPLAY_BOX_OFF;
+    out->nat_box = DISPLAY_BOX_OFF;
+    out->ids_box = DISPLAY_BOX_OK;
+    strlcpy(out->last_suspicious_domain, "n/d", sizeof(out->last_suspicious_domain));
+    display_format_clock(out->clock_label, sizeof(out->clock_label));
+
+    uint64_t now_ms = uptime_ms();
+    out->client_count = get_client_count();
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    uint32_t active_clients = 0;
+    char highest_client[DNS_CLIENT_LEN];
+    char last_domain[DNS_DOMAIN_LEN];
+    ids_summary_locked(&active_clients, &out->highest_risk_score, highest_client, sizeof(highest_client), last_domain, sizeof(last_domain));
+    (void)active_clients;
+    out->upstream_configured = upstream_configured;
+    out->upstream_connecting = upstream_connecting;
+    out->upstream_connected = upstream_connected;
+    out->nat_attempted = nat_attempted;
+    out->nat_active = nat_active;
+    uint64_t suspicious_age = display_last_suspicious_ms == 0 ? UINT64_MAX : now_ms - display_last_suspicious_ms;
+    uint64_t attack_age = display_last_attack_ms == 0 ? UINT64_MAX : now_ms - display_last_attack_ms;
+    strlcpy(out->last_suspicious_domain,
+            display_last_suspicious_domain[0] != '\0' ? display_last_suspicious_domain : "n/d",
+            sizeof(out->last_suspicious_domain));
+    xSemaphoreGive(state_mutex);
+
+    bool attack_recent = attack_age <= DISPLAY_ATTACK_HOLD_MS;
+    bool suspicious_recent = suspicious_age <= DISPLAY_SUSPICIOUS_HOLD_MS;
+    if (attack_recent || out->highest_risk_score >= 15U) {
+        out->state = DISPLAY_STATE_ATTACK;
+    } else if (suspicious_recent) {
+        out->state = DISPLAY_STATE_SUSPICIOUS_DNS;
+    } else {
+        out->state = DISPLAY_STATE_NORMAL;
+    }
+    display_current_state = out->state;
+
+    if (out->upstream_connected) {
+        out->upstream_box = DISPLAY_BOX_OK;
+    } else if (out->upstream_configured && out->upstream_connecting) {
+        out->upstream_box = DISPLAY_BOX_WARN;
+    } else if (out->upstream_configured) {
+        out->upstream_box = DISPLAY_BOX_ALERT;
+    } else {
+        out->upstream_box = DISPLAY_BOX_OFF;
+    }
+
+    if (out->nat_active) {
+        out->nat_box = DISPLAY_BOX_OK;
+    } else if (!out->upstream_connected) {
+        out->nat_box = DISPLAY_BOX_WARN;
+    } else if (out->nat_attempted) {
+        out->nat_box = DISPLAY_BOX_ALERT;
+    } else {
+        out->nat_box = DISPLAY_BOX_OFF;
+    }
+
+    if (out->state == DISPLAY_STATE_ATTACK) {
+        out->ids_box = DISPLAY_BOX_ALERT;
+    } else if (out->state == DISPLAY_STATE_SUSPICIOUS_DNS) {
+        out->ids_box = DISPLAY_BOX_WARN;
+    } else {
+        out->ids_box = DISPLAY_BOX_OK;
+    }
+}
+
+#if APPLIANCE_V2_ENABLE_DISPLAY
+#define DISPLAY_COLOR_BLACK 0x0000
+#define DISPLAY_COLOR_WHITE 0xFFFF
+#define DISPLAY_COLOR_GRAY 0x8410
+#define DISPLAY_COLOR_DARK 0x18E3
+#define DISPLAY_COLOR_GREEN 0x07E0
+#define DISPLAY_COLOR_YELLOW 0xFFE0
+#define DISPLAY_COLOR_RED 0xF800
+#define DISPLAY_COLOR_ORANGE 0xFC00
+#define DISPLAY_COLOR_BLUE 0x001F
+
+static uint16_t display_swap_color(uint16_t color)
+{
+    return (uint16_t)((color << 8) | (color >> 8));
+}
+
+static esp_err_t display_send_cmd(uint8_t cmd)
+{
+    if (display_spi == NULL) {
+        return ESP_FAIL;
+    }
+    gpio_set_level((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_DC, 0);
+    spi_transaction_t t = {0};
+    t.length = 8;
+    t.tx_buffer = &cmd;
+    return spi_device_polling_transmit(display_spi, &t);
+}
+
+static esp_err_t display_send_data(const void *data, size_t len)
+{
+    if (display_spi == NULL || data == NULL || len == 0) {
+        return ESP_FAIL;
+    }
+    gpio_set_level((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_DC, 1);
+    spi_transaction_t t = {0};
+    t.length = len * 8;
+    t.tx_buffer = data;
+    return spi_device_polling_transmit(display_spi, &t);
+}
+
+static void display_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    uint8_t data[4];
+    display_send_cmd(0x2A);
+    data[0] = (uint8_t)(x0 >> 8);
+    data[1] = (uint8_t)x0;
+    data[2] = (uint8_t)(x1 >> 8);
+    data[3] = (uint8_t)x1;
+    display_send_data(data, sizeof(data));
+    display_send_cmd(0x2B);
+    data[0] = (uint8_t)(y0 >> 8);
+    data[1] = (uint8_t)y0;
+    data[2] = (uint8_t)(y1 >> 8);
+    data[3] = (uint8_t)y1;
+    display_send_data(data, sizeof(data));
+    display_send_cmd(0x2C);
+}
+
+static void display_fill_rect(int x, int y, int w, int h, uint16_t color)
+{
+    if (!display_available || w <= 0 || h <= 0) {
+        return;
+    }
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (x >= APPLIANCE_V2_DISPLAY_WIDTH || y >= APPLIANCE_V2_DISPLAY_HEIGHT || w <= 0 || h <= 0) {
+        return;
+    }
+    if (x + w > APPLIANCE_V2_DISPLAY_WIDTH) {
+        w = APPLIANCE_V2_DISPLAY_WIDTH - x;
+    }
+    if (y + h > APPLIANCE_V2_DISPLAY_HEIGHT) {
+        h = APPLIANCE_V2_DISPLAY_HEIGHT - y;
+    }
+    display_set_window((uint16_t)x, (uint16_t)y, (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+    uint16_t line[64];
+    uint16_t encoded = display_swap_color(color);
+    for (size_t i = 0; i < sizeof(line) / sizeof(line[0]); i++) {
+        line[i] = encoded;
+    }
+    int pixels = w * h;
+    while (pixels > 0) {
+        int chunk = pixels > (int)(sizeof(line) / sizeof(line[0])) ? (int)(sizeof(line) / sizeof(line[0])) : pixels;
+        display_send_data(line, (size_t)chunk * sizeof(uint16_t));
+        pixels -= chunk;
+    }
+}
+
+static uint8_t display_font_rows(char c, uint8_t row)
+{
+    static const uint8_t digits[10][7] = {
+        {14,17,19,21,25,17,14},{4,12,4,4,4,4,14},{14,17,1,2,4,8,31},{30,1,1,14,1,1,30},{2,6,10,18,31,2,2},
+        {31,16,30,1,1,17,14},{6,8,16,30,17,17,14},{31,1,2,4,8,8,8},{14,17,17,14,17,17,14},{14,17,17,15,1,2,12}
+    };
+    if (row >= 7) {
+        return 0;
+    }
+    if (c >= '0' && c <= '9') {
+        return digits[c - '0'][row];
+    }
+    switch (c) {
+    case 'A': {static const uint8_t r[7]={14,17,17,31,17,17,17}; return r[row];}
+    case 'B': {static const uint8_t r[7]={30,17,17,30,17,17,30}; return r[row];}
+    case 'C': {static const uint8_t r[7]={14,17,16,16,16,17,14}; return r[row];}
+    case 'D': {static const uint8_t r[7]={30,17,17,17,17,17,30}; return r[row];}
+    case 'E': {static const uint8_t r[7]={31,16,16,30,16,16,31}; return r[row];}
+    case 'F': {static const uint8_t r[7]={31,16,16,30,16,16,16}; return r[row];}
+    case 'G': {static const uint8_t r[7]={14,17,16,23,17,17,15}; return r[row];}
+    case 'H': {static const uint8_t r[7]={17,17,17,31,17,17,17}; return r[row];}
+    case 'I': {static const uint8_t r[7]={14,4,4,4,4,4,14}; return r[row];}
+    case 'K': {static const uint8_t r[7]={17,18,20,24,20,18,17}; return r[row];}
+    case 'L': {static const uint8_t r[7]={16,16,16,16,16,16,31}; return r[row];}
+    case 'M': {static const uint8_t r[7]={17,27,21,21,17,17,17}; return r[row];}
+    case 'N': {static const uint8_t r[7]={17,25,21,19,17,17,17}; return r[row];}
+    case 'O': {static const uint8_t r[7]={14,17,17,17,17,17,14}; return r[row];}
+    case 'P': {static const uint8_t r[7]={30,17,17,30,16,16,16}; return r[row];}
+    case 'R': {static const uint8_t r[7]={30,17,17,30,20,18,17}; return r[row];}
+    case 'S': {static const uint8_t r[7]={15,16,16,14,1,1,30}; return r[row];}
+    case 'T': {static const uint8_t r[7]={31,4,4,4,4,4,4}; return r[row];}
+    case 'U': {static const uint8_t r[7]={17,17,17,17,17,17,14}; return r[row];}
+    case 'V': {static const uint8_t r[7]={17,17,17,17,17,10,4}; return r[row];}
+    case 'W': {static const uint8_t r[7]={17,17,17,21,21,21,10}; return r[row];}
+    case 'Y': {static const uint8_t r[7]={17,17,10,4,4,4,4}; return r[row];}
+    case ':': {static const uint8_t r[7]={0,4,4,0,4,4,0}; return r[row];}
+    case '.': {static const uint8_t r[7]={0,0,0,0,0,12,12}; return r[row];}
+    case '-': {static const uint8_t r[7]={0,0,0,31,0,0,0}; return r[row];}
+    case '/': {static const uint8_t r[7]={1,2,2,4,8,8,16}; return r[row];}
+    default: return 0;
+    }
+}
+
+static void display_draw_char(int x, int y, char c, uint16_t color, int scale)
+{
+    if (c >= 'a' && c <= 'z') {
+        c = (char)(c - 32);
+    }
+    for (uint8_t row = 0; row < 7; row++) {
+        uint8_t bits = display_font_rows(c, row);
+        for (uint8_t col = 0; col < 5; col++) {
+            if (bits & (1U << (4U - col))) {
+                display_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+static void display_draw_text(int x, int y, const char *text, uint16_t color, int scale)
+{
+    if (text == NULL) {
+        return;
+    }
+    int cursor = x;
+    for (size_t i = 0; text[i] != '\0'; i++) {
+        if (text[i] == ' ') {
+            cursor += 4 * scale;
+            continue;
+        }
+        display_draw_char(cursor, y, text[i], color, scale);
+        cursor += 6 * scale;
+        if (cursor > APPLIANCE_V2_DISPLAY_WIDTH - 6 * scale) {
+            break;
+        }
+    }
+}
+
+static void display_draw_pixel_icon(int x, int y, const uint8_t rows[16], uint16_t color, int scale)
+{
+    for (uint8_t row = 0; row < 16; row++) {
+        for (uint8_t col = 0; col < 8; col++) {
+            if (rows[row] & (1U << (7U - col))) {
+                display_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+            }
+        }
+    }
+}
+
+static uint16_t display_box_color(display_box_state_t state)
+{
+    switch (state) {
+    case DISPLAY_BOX_OK: return DISPLAY_COLOR_GREEN;
+    case DISPLAY_BOX_WARN: return DISPLAY_COLOR_YELLOW;
+    case DISPLAY_BOX_ALERT: return DISPLAY_COLOR_RED;
+    case DISPLAY_BOX_OFF:
+    default: return DISPLAY_COLOR_GRAY;
+    }
+}
+
+static void display_draw_status_boxes(const display_snapshot_t *state)
+{
+    display_fill_rect(8, APPLIANCE_V2_DISPLAY_HEIGHT - 48, 68, 38, DISPLAY_COLOR_DARK);
+    display_fill_rect(86, APPLIANCE_V2_DISPLAY_HEIGHT - 48, 68, 38, DISPLAY_COLOR_DARK);
+    display_fill_rect(164, APPLIANCE_V2_DISPLAY_HEIGHT - 48, 68, 38, DISPLAY_COLOR_DARK);
+    display_fill_rect(12, APPLIANCE_V2_DISPLAY_HEIGHT - 44, 14, 14, display_box_color(state->upstream_box));
+    display_fill_rect(90, APPLIANCE_V2_DISPLAY_HEIGHT - 44, 14, 14, display_box_color(state->nat_box));
+    display_fill_rect(168, APPLIANCE_V2_DISPLAY_HEIGHT - 44, 14, 14, display_box_color(state->ids_box));
+    display_draw_text(30, APPLIANCE_V2_DISPLAY_HEIGHT - 42, "UP", DISPLAY_COLOR_WHITE, 1);
+    display_draw_text(108, APPLIANCE_V2_DISPLAY_HEIGHT - 42, "NAT", DISPLAY_COLOR_WHITE, 1);
+    display_draw_text(186, APPLIANCE_V2_DISPLAY_HEIGHT - 42, "IDS", DISPLAY_COLOR_WHITE, 1);
+}
+
+static void display_draw_normal(const display_snapshot_t *state)
+{
+    static const uint8_t shield[16] = {0x3C,0x7E,0xFF,0xDB,0xDB,0xDB,0xDB,0xC3,0xC3,0x66,0x66,0x3C,0x3C,0x18,0x18,0x00};
+    display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
+    display_draw_pixel_icon(32, 34, shield, DISPLAY_COLOR_GREEN, 7);
+    display_draw_text(118, 46, "NORMAL", DISPLAY_COLOR_GREEN, 2);
+    display_draw_text(118, 76, state->clock_label, DISPLAY_COLOR_WHITE, 2);
+    char line[24];
+    snprintf(line, sizeof(line), "CL:%u", state->client_count);
+    display_draw_text(118, 106, line, DISPLAY_COLOR_WHITE, 2);
+    snprintf(line, sizeof(line), "RISK:%u", state->highest_risk_score);
+    display_draw_text(118, 136, line, DISPLAY_COLOR_WHITE, 1);
+    display_draw_status_boxes(state);
+}
+
+static void display_draw_suspicious_dns(const display_snapshot_t *state)
+{
+    static const uint8_t skull[16] = {0x3C,0x7E,0xDB,0xFF,0xA5,0xFF,0xBD,0x7E,0x3C,0x24,0x3C,0x24,0x24,0x00,0x00,0x00};
+    display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
+    display_draw_pixel_icon(28, 24, skull, DISPLAY_COLOR_RED, 8);
+    display_draw_text(112, 38, "DNS SUS", DISPLAY_COLOR_YELLOW, 2);
+    display_draw_text(112, 70, state->clock_label, DISPLAY_COLOR_WHITE, 2);
+    char domain[DISPLAY_DOMAIN_LABEL_LEN];
+    strlcpy(domain, state->last_suspicious_domain, sizeof(domain));
+    display_draw_text(16, 164, domain, DISPLAY_COLOR_RED, 1);
+    display_draw_status_boxes(state);
+}
+
+static void display_draw_attack(const display_snapshot_t *state)
+{
+    static const uint8_t alert[16] = {0x18,0x18,0x3C,0x3C,0x7E,0x7E,0xDB,0xDB,0xFF,0xFF,0x18,0x18,0x00,0x18,0x18,0x00};
+    display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
+    display_draw_pixel_icon(32, 18, alert, DISPLAY_COLOR_RED, 8);
+    display_draw_text(116, 42, "ATTACK", DISPLAY_COLOR_RED, 2);
+    display_draw_text(116, 76, state->clock_label, DISPLAY_COLOR_WHITE, 2);
+    char line[24];
+    snprintf(line, sizeof(line), "RISK:%u", state->highest_risk_score);
+    display_draw_text(116, 110, line, DISPLAY_COLOR_ORANGE, 2);
+    snprintf(line, sizeof(line), "CL:%u", state->client_count);
+    display_draw_text(116, 142, line, DISPLAY_COLOR_WHITE, 1);
+    display_draw_status_boxes(state);
+}
+
+static bool display_snapshot_changed(const display_snapshot_t *a, const display_snapshot_t *b)
+{
+    return a->state != b->state ||
+           a->upstream_box != b->upstream_box ||
+           a->nat_box != b->nat_box ||
+           a->ids_box != b->ids_box ||
+           a->client_count != b->client_count ||
+           a->highest_risk_score != b->highest_risk_score ||
+           strcmp(a->clock_label, b->clock_label) != 0 ||
+           strcmp(a->last_suspicious_domain, b->last_suspicious_domain) != 0;
+}
+
+static void display_draw_snapshot(const display_snapshot_t *state)
+{
+    if (state->state == DISPLAY_STATE_ATTACK) {
+        display_draw_attack(state);
+    } else if (state->state == DISPLAY_STATE_SUSPICIOUS_DNS) {
+        display_draw_suspicious_dns(state);
+    } else {
+        display_draw_normal(state);
+    }
+}
+
+static bool display_pins_configured(void)
+{
+    return APPLIANCE_V2_DISPLAY_PIN_MOSI >= 0 &&
+           APPLIANCE_V2_DISPLAY_PIN_SCLK >= 0 &&
+           APPLIANCE_V2_DISPLAY_PIN_CS >= 0 &&
+           APPLIANCE_V2_DISPLAY_PIN_DC >= 0;
+}
+#endif
+
+static void display_init(void)
+{
+#if APPLIANCE_V2_ENABLE_DISPLAY
+    display_available = false;
+    if (!display_pins_configured() || APPLIANCE_V2_DISPLAY_DRIVER == APPLIANCE_V2_DISPLAY_DRIVER_NONE) {
+        add_event("WARN", "display", "Display enabled but driver/pins are incomplete");
+        return;
+    }
+
+    spi_bus_config_t buscfg = {
+        .mosi_io_num = APPLIANCE_V2_DISPLAY_PIN_MOSI,
+        .miso_io_num = APPLIANCE_V2_DISPLAY_PIN_MISO,
+        .sclk_io_num = APPLIANCE_V2_DISPLAY_PIN_SCLK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 4096,
+    };
+    spi_device_interface_config_t devcfg = {
+        .clock_speed_hz = 20 * 1000 * 1000,
+        .mode = 0,
+        .spics_io_num = APPLIANCE_V2_DISPLAY_PIN_CS,
+        .queue_size = 1,
+    };
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        add_event("WARN", "display", "SPI bus init failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &display_spi);
+    if (ret != ESP_OK) {
+        spi_bus_free(SPI2_HOST);
+        add_event("WARN", "display", "SPI display attach failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    gpio_set_direction((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_DC, GPIO_MODE_OUTPUT);
+    if (APPLIANCE_V2_DISPLAY_PIN_RST >= 0) {
+        gpio_set_direction((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_RST, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_RST, 0);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_RST, 1);
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    if (APPLIANCE_V2_DISPLAY_PIN_BL >= 0) {
+        gpio_set_direction((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_BL, GPIO_MODE_OUTPUT);
+        gpio_set_level((gpio_num_t)APPLIANCE_V2_DISPLAY_PIN_BL, 1);
+    }
+
+    display_send_cmd(0x01);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    display_send_cmd(0x11);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    uint8_t color_mode = 0x55;
+    display_send_cmd(0x3A);
+    display_send_data(&color_mode, 1);
+    uint8_t madctl = 0x00;
+    display_send_cmd(0x36);
+    display_send_data(&madctl, 1);
+    if (APPLIANCE_V2_DISPLAY_DRIVER == APPLIANCE_V2_DISPLAY_DRIVER_ST7789) {
+        display_send_cmd(0x21);
+    }
+    display_send_cmd(0x29);
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    display_available = true;
+    add_event("INFO", "display", "Local display initialized driver=%d size=%dx%d", APPLIANCE_V2_DISPLAY_DRIVER, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT);
+#else
+    display_available = false;
+#endif
+}
+
+static void display_update_if_needed(void)
+{
+    display_snapshot_t snapshot;
+    compute_display_state(&snapshot);
+#if APPLIANCE_V2_ENABLE_DISPLAY
+    static bool drawn_once = false;
+    static display_snapshot_t last_snapshot;
+    uint64_t now_ms = uptime_ms();
+    if (!display_available || now_ms - display_last_update_ms < DISPLAY_REFRESH_MIN_MS) {
+        return;
+    }
+    if (!drawn_once || display_snapshot_changed(&snapshot, &last_snapshot)) {
+        display_draw_snapshot(&snapshot);
+        last_snapshot = snapshot;
+        drawn_once = true;
+        display_last_update_ms = now_ms;
+    }
+#else
+    display_last_update_ms = uptime_ms();
+#endif
+}
 
 static uint64_t uptime_ms(void)
 {
@@ -518,6 +1062,16 @@ static void log_http_event(httpd_req_t *req, const char *route, const char *leve
     if (httpd_req_get_hdr_value_str(req, "User-Agent", agent, sizeof(agent)) != ESP_OK) {
         strlcpy(agent, "n/d", sizeof(agent));
     }
+    if (level != NULL && strcmp(level, "SECURITY") == 0) {
+        uint64_t now_ms = uptime_ms();
+        if (state_mutex != NULL) {
+            xSemaphoreTake(state_mutex, portMAX_DELAY);
+            display_note_attack(now_ms);
+            xSemaphoreGive(state_mutex);
+        } else {
+            display_note_attack(now_ms);
+        }
+    }
     add_event(level, "http", "GET %s from %s ua=%s %s", route, ip, agent, note);
 }
 
@@ -826,6 +1380,12 @@ static void record_dns_query(const char *client, const char *domain, const char 
         dns_query_count++;
     }
     ids_record_dns_query_locked(client, domain, suspicious, now_ms, &burst_detected);
+    if (suspicious) {
+        display_note_suspicious_dns(domain, now_ms);
+    }
+    if (burst_detected) {
+        display_note_attack(now_ms);
+    }
     xSemaphoreGive(state_mutex);
 
     if (first_observed) {
@@ -1078,7 +1638,7 @@ static esp_err_t root_handler(httpd_req_t *req)
         "async function load(){const s=await fetch('/api/status').then(r=>r.json());"
         "document.getElementById('cards').innerHTML=["
         "['AP',s.ap.ssid+' / '+s.ap.ip],['Upstream',s.upstream.connected?s.upstream.ip:(s.upstream.configured?'conectando':'n/d')],"
-        "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Clientes AP',s.clients.count],['Clientes observados',s.clients_observed.total_clients_seen],['Maior risk',s.clients_observed.highest_risk_score],"
+        "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Display',(s.display&&s.display.enabled?(s.display.available?'ok':'indisp'):'off')+' / '+(s.display?s.display.state:'n/d')],['Clientes AP',s.clients.count],['Clientes observados',s.clients_observed.total_clients_seen],['Maior risk',s.clients_observed.highest_risk_score],"
         "['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio IDS',s.clients_observed.last_domain||'n/d'],['Último domínio',s.dns.last_domain||'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
         "].map(c=>card(c[0],c[1])).join('');"
         "document.getElementById('routes').innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');"
@@ -1143,6 +1703,9 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     strlcpy(gw_snapshot, upstream_gw, sizeof(gw_snapshot));
     strlcpy(netmask_snapshot, upstream_netmask, sizeof(netmask_snapshot));
     xSemaphoreGive(state_mutex);
+
+    display_snapshot_t display_snapshot;
+    compute_display_state(&display_snapshot);
 
     char project_json[64];
     char version_json[24];
@@ -1270,10 +1833,15 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     snprintf(json + used, 12288 - used,
         "]},\"event_count\":%lu,"
         "\"limits\":{\"events_capacity\":%d,\"route_track_capacity\":%d},"
+        "\"display\":{\"enabled\":%s,\"available\":%s,\"state\":\"%s\",\"last_update_ms\":%llu},"
         "\"limitations\":[\"events_only_in_ram\",\"no_firewall_professional\",\"no_https_inspection\",\"nat_requires_sta_ip\"]}",
         (unsigned long)event_count_snapshot,
         EVENT_CAPACITY,
-        ROUTE_TRACK_CAPACITY);
+        ROUTE_TRACK_CAPACITY,
+        APPLIANCE_V2_ENABLE_DISPLAY ? "true" : "false",
+        display_available ? "true" : "false",
+        display_state_name(display_snapshot.state),
+        (unsigned long long)display_last_update_ms);
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_sendstr(req, json);
@@ -1542,7 +2110,7 @@ static esp_err_t report_handler(httpd_req_t *req)
         "<section class=\"card\"><h2>DNS/Tráfego observado</h2><table><tr><td>Monitor DNS</td><td>Registra consultas de domínio feitas por clientes do AP via proxy DNS local.</td></tr><tr><td>Privacidade</td><td>HTTPS continua criptografado; o sistema não lê conteúdo das páginas.</td></tr><tr><td>Escopo</td><td>Detecção didática por domínios de teste suspeitos, sem bloqueio nesta sprint.</td></tr></table></section><section class=\"card\"><h2>Clientes e risco didático</h2><table><tr><td>Score</td><td>Heurística didática em RAM: +5 por domínio suspeito, +1 por burst DNS e +2 por muitos domínios únicos aproximados.</td></tr><tr><td>Classificação</td><td>0-4 baixo, 5-14 atenção, 15+ suspeito.</td></tr><tr><td>Limitação</td><td>Usa DNS/metadados observáveis e não inspeciona HTTPS nem conteúdo de páginas.</td></tr></table></section></main>"
         "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
         "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
-        "fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['Heap livre',s.heap_free],['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio IDS',s.clients_observed.last_domain||'n/d'],['DNS suspeito',s.dns.suspicious_count],['Último domínio',s.dns.last_domain||'n/d']].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
+        "fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Display',(s.display&&s.display.enabled?(s.display.available?'ok':'indisp'):'off')+' / '+(s.display?s.display.state:'n/d')],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['Heap livre',s.heap_free],['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio IDS',s.clients_observed.last_domain||'n/d'],['DNS suspeito',s.dns.suspicious_count],['Último domínio',s.dns.last_domain||'n/d']].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -1711,10 +2279,12 @@ void app_main(void)
     start_wifi_ap_sta();
     start_dns_proxy();
     start_http_server();
+    display_init();
     log_runtime_diagnostics("after_services_start");
 
     while (true) {
         service_deferred_events();
+        display_update_if_needed();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
