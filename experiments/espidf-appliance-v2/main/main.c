@@ -127,6 +127,11 @@ static char dns_last_client[DNS_CLIENT_LEN] = "";
 static char dns_last_query_type[DNS_QUERY_TYPE_LEN] = "";
 static volatile bool time_synchronized = false;
 static bool sntp_started = false;
+static volatile bool sntp_sync_event_pending = false;
+static bool sta_reconnect_pending = false;
+static uint8_t sta_retry_count = 0;
+static uint64_t sta_next_reconnect_ms = 0;
+static TaskHandle_t dns_task_handle = NULL;
 static char last_timestamp[TIMESTAMP_LEN] = "unsynced";
 static const char *TIMEZONE_LABEL = "America/Sao_Paulo";
 static bool upstream_configured = false;
@@ -202,6 +207,10 @@ static void json_escape_string(const char *in, char *out, size_t out_len)
     if (out_len == 0) {
         return;
     }
+    if (in == NULL) {
+        out[0] = '\0';
+        return;
+    }
     for (size_t i = 0; in[i] != '\0' && pos + 1 < out_len; i++) {
         unsigned char c = (unsigned char)in[i];
         if ((c == '"' || c == '\\') && pos + 2 < out_len) {
@@ -218,6 +227,15 @@ static void json_escape_string(const char *in, char *out, size_t out_len)
 
 static void add_event(const char *level, const char *source, const char *fmt, ...)
 {
+    if (level == NULL) {
+        level = "INFO";
+    }
+    if (source == NULL) {
+        source = "app";
+    }
+    if (fmt == NULL) {
+        fmt = "event";
+    }
     char message[EVENT_MESSAGE_LEN];
     va_list args;
     va_start(args, fmt);
@@ -433,7 +451,13 @@ static void increment_route_counter(const char *route)
 
 static void request_client_ip(httpd_req_t *req, char *out, size_t out_len)
 {
+    if (out == NULL || out_len == 0) {
+        return;
+    }
     strlcpy(out, "n/d", out_len);
+    if (req == NULL) {
+        return;
+    }
     int sockfd = httpd_req_to_sockfd(req);
     struct sockaddr_storage addr;
     socklen_t addr_len = sizeof(addr);
@@ -446,6 +470,12 @@ static void request_client_ip(httpd_req_t *req, char *out, size_t out_len)
 
 static void log_http_event(httpd_req_t *req, const char *route, const char *level, const char *note)
 {
+    if (route == NULL) {
+        route = "n/d";
+    }
+    if (note == NULL) {
+        note = "";
+    }
     char ip[24];
     char agent[64] = "n/d";
     request_client_ip(req, ip, sizeof(ip));
@@ -459,8 +489,7 @@ static void sntp_sync_callback(struct timeval *tv)
 {
     (void)tv;
     time_synchronized = true;
-    snapshot_time(last_timestamp, sizeof(last_timestamp), NULL);
-    add_event("INFO", "time", "SNTP synchronized: %s", last_timestamp);
+    sntp_sync_event_pending = true;
 }
 
 static void start_sntp_sync(void)
@@ -501,7 +530,13 @@ static bool is_suspicious_domain(const char *domain)
 
 static bool parse_dns_query(const uint8_t *packet, ssize_t len, char *domain, size_t domain_len, uint16_t *qtype)
 {
-    if (len < 17 || domain_len == 0) {
+    if (domain != NULL && domain_len > 0) {
+        domain[0] = '\0';
+    }
+    if (qtype != NULL) {
+        *qtype = 0;
+    }
+    if (packet == NULL || domain == NULL || qtype == NULL || len < 17 || len > DNS_PACKET_MAX || domain_len == 0) {
         return false;
     }
     uint16_t qdcount = ((uint16_t)packet[4] << 8) | packet[5];
@@ -538,6 +573,15 @@ static bool parse_dns_query(const uint8_t *packet, ssize_t len, char *domain, si
 
 static void record_dns_query(const char *client, const char *domain, const char *query_type)
 {
+    if (client == NULL) {
+        client = "n/d";
+    }
+    if (domain == NULL || domain[0] == '\0') {
+        return;
+    }
+    if (query_type == NULL) {
+        query_type = "OTHER";
+    }
     char timestamp[TIMESTAMP_LEN];
     char label[16];
     bool synced = false;
@@ -593,17 +637,23 @@ static void record_dns_query(const char *client, const char *domain, const char 
 
 static int forward_dns_once(const uint8_t *query, ssize_t query_len, uint8_t *response, size_t response_len, const char *server_ip)
 {
+    if (query == NULL || response == NULL || server_ip == NULL || query_len <= 0 || query_len > DNS_PACKET_MAX || response_len < DNS_PACKET_MAX) {
+        return -1;
+    }
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) {
         return -1;
     }
-    struct timeval timeout = {.tv_sec = 1, .tv_usec = 200000};
+    struct timeval timeout = {.tv_sec = 0, .tv_usec = 700000};
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
     struct sockaddr_in upstream = {0};
     upstream.sin_family = AF_INET;
     upstream.sin_port = htons(53);
-    inet_pton(AF_INET, server_ip, &upstream.sin_addr);
+    if (inet_pton(AF_INET, server_ip, &upstream.sin_addr) != 1) {
+        close(sock);
+        return -1;
+    }
 
     int sent = sendto(sock, query, query_len, 0, (struct sockaddr *)&upstream, sizeof(upstream));
     if (sent < 0) {
@@ -618,9 +668,21 @@ static int forward_dns_once(const uint8_t *query, ssize_t query_len, uint8_t *re
 static void dns_proxy_task(void *arg)
 {
     (void)arg;
+    uint8_t *query = calloc(1, DNS_PACKET_MAX);
+    uint8_t *response = calloc(1, DNS_PACKET_MAX);
+    if (query == NULL || response == NULL) {
+        add_event("ERROR", "dns", "DNS proxy buffer allocation failed");
+        free(query);
+        free(response);
+        vTaskDelete(NULL);
+        return;
+    }
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (sock < 0) {
         add_event("ERROR", "dns", "DNS proxy socket creation failed");
+        free(query);
+        free(response);
         vTaskDelete(NULL);
         return;
     }
@@ -632,6 +694,8 @@ static void dns_proxy_task(void *arg)
     if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
         add_event("ERROR", "dns", "DNS proxy bind failed on UDP port %d", DNS_PROXY_PORT);
         close(sock);
+        free(query);
+        free(response);
         vTaskDelete(NULL);
         return;
     }
@@ -640,12 +704,10 @@ static void dns_proxy_task(void *arg)
     add_event("INFO", "dns", "DNS monitor/proxy started on UDP port %d", DNS_PROXY_PORT);
 
     while (true) {
-        uint8_t query[DNS_PACKET_MAX];
-        uint8_t response[DNS_PACKET_MAX];
         struct sockaddr_in client_addr = {0};
         socklen_t client_len = sizeof(client_addr);
-        ssize_t len = recvfrom(sock, query, sizeof(query), 0, (struct sockaddr *)&client_addr, &client_len);
-        if (len <= 0) {
+        ssize_t len = recvfrom(sock, query, DNS_PACKET_MAX, 0, (struct sockaddr *)&client_addr, &client_len);
+        if (len <= 0 || len > DNS_PACKET_MAX) {
             continue;
         }
 
@@ -658,11 +720,11 @@ static void dns_proxy_task(void *arg)
             record_dns_query(client_ip, domain, dns_query_type_label(qtype));
         }
 
-        int resp_len = forward_dns_once(query, len, response, sizeof(response), "1.1.1.1");
+        int resp_len = forward_dns_once(query, len, response, DNS_PACKET_MAX, "1.1.1.1");
         if (resp_len <= 0) {
-            resp_len = forward_dns_once(query, len, response, sizeof(response), "8.8.8.8");
+            resp_len = forward_dns_once(query, len, response, DNS_PACKET_MAX, "8.8.8.8");
         }
-        if (resp_len > 0) {
+        if (resp_len > 0 && resp_len <= DNS_PACKET_MAX) {
             sendto(sock, response, resp_len, 0, (struct sockaddr *)&client_addr, client_len);
         }
     }
@@ -670,7 +732,11 @@ static void dns_proxy_task(void *arg)
 
 static void start_dns_proxy(void)
 {
-    xTaskCreatePinnedToCore(dns_proxy_task, "dnsProxy", 4096, NULL, 4, NULL, 0);
+    BaseType_t ok = xTaskCreatePinnedToCore(dns_proxy_task, "dnsProxy", 6144, NULL, 4, &dns_task_handle, 0);
+    if (ok != pdPASS) {
+        dns_task_handle = NULL;
+        add_event("ERROR", "dns", "DNS proxy task creation failed");
+    }
 }
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
@@ -699,12 +765,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         strlcpy(upstream_netmask, "0.0.0.0", sizeof(upstream_netmask));
         add_event("WARN", "wifi", "STA disconnected: reason=%u (%s)", event->reason, wifi_reason_description(event->reason));
 
-        static uint8_t retry_count = 0;
-        if (upstream_configured && retry_count < STA_MAXIMUM_RETRY) {
-            retry_count++;
-            upstream_connecting = true;
-            add_event("INFO", "wifi", "STA reconnect attempt %u/%u", retry_count, STA_MAXIMUM_RETRY);
-            esp_wifi_connect();
+        if (upstream_configured && sta_retry_count < STA_MAXIMUM_RETRY && !sta_reconnect_pending) {
+            sta_retry_count++;
+            sta_reconnect_pending = true;
+            sta_next_reconnect_ms = uptime_ms() + (uint64_t)(2000U * sta_retry_count);
+            add_event("INFO", "wifi", "STA reconnect scheduled %u/%u", sta_retry_count, STA_MAXIMUM_RETRY);
         }
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
@@ -716,6 +781,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         upstream_connecting = false;
         upstream_connected = true;
+        sta_reconnect_pending = false;
+        sta_retry_count = 0;
         snprintf(upstream_ip, sizeof(upstream_ip), IPSTR, IP2STR(&event->ip_info.ip));
         snprintf(upstream_gw, sizeof(upstream_gw), IPSTR, IP2STR(&event->ip_info.gw));
         snprintf(upstream_netmask, sizeof(upstream_netmask), IPSTR, IP2STR(&event->ip_info.netmask));
@@ -1025,7 +1092,12 @@ static esp_err_t api_dns_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    dns_query_t snapshot[DNS_RECENT_CAPACITY];
+    dns_query_t *snapshot = calloc(DNS_RECENT_CAPACITY, sizeof(dns_query_t));
+    if (snapshot == NULL) {
+        free(json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
     uint32_t count_snapshot;
     uint32_t write_snapshot;
     uint64_t total_snapshot;
@@ -1033,7 +1105,7 @@ static esp_err_t api_dns_handler(httpd_req_t *req)
     bool enabled_snapshot;
 
     xSemaphoreTake(state_mutex, portMAX_DELAY);
-    memcpy(snapshot, dns_queries, sizeof(snapshot));
+    memcpy(snapshot, dns_queries, DNS_RECENT_CAPACITY * sizeof(dns_query_t));
     count_snapshot = dns_query_count;
     write_snapshot = dns_write_index;
     total_snapshot = dns_total_queries;
@@ -1076,6 +1148,7 @@ static esp_err_t api_dns_handler(httpd_req_t *req)
         "],\"limitations\":[\"dns_queries_only\",\"no_https_content_inspection\",\"a_aaaa_queries_recorded\",\"best_effort_udp_proxy\",\"ram_only\"]}");
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_sendstr(req, json);
+    free(snapshot);
     free(json);
     return ret;
 }
@@ -1227,6 +1300,7 @@ static void start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
+    config.stack_size = 12288;
     config.max_uri_handlers = 28;
 
     ESP_ERROR_CHECK(httpd_start(&http_server, &config));
@@ -1262,6 +1336,35 @@ static void start_http_server(void)
     add_event("INFO", "http", "HTTP server started on port 80");
 }
 
+static void service_deferred_events(void)
+{
+    if (sntp_sync_event_pending) {
+        sntp_sync_event_pending = false;
+        snapshot_time(last_timestamp, sizeof(last_timestamp), NULL);
+        add_event("INFO", "time", "SNTP synchronized: %s", last_timestamp);
+    }
+
+    if (sta_reconnect_pending && upstream_configured && !upstream_connected && uptime_ms() >= sta_next_reconnect_ms) {
+        sta_reconnect_pending = false;
+        upstream_connecting = true;
+        add_event("INFO", "wifi", "STA reconnect attempt %u/%u", sta_retry_count, STA_MAXIMUM_RETRY);
+        esp_wifi_connect();
+    }
+}
+
+static void log_runtime_diagnostics(const char *phase)
+{
+    if (phase == NULL) {
+        phase = "runtime";
+    }
+    add_event("INFO", "diag", "%s heap_free=%lu heap_min=%lu main_stack_hwm=%lu dns_stack_hwm=%lu",
+              phase,
+              (unsigned long)esp_get_free_heap_size(),
+              (unsigned long)esp_get_minimum_free_heap_size(),
+              (unsigned long)uxTaskGetStackHighWaterMark(NULL),
+              dns_task_handle != NULL ? (unsigned long)uxTaskGetStackHighWaterMark(dns_task_handle) : 0UL);
+}
+
 void app_main(void)
 {
     state_mutex = xSemaphoreCreateMutex();
@@ -1280,8 +1383,10 @@ void app_main(void)
     start_wifi_ap_sta();
     start_dns_proxy();
     start_http_server();
+    log_runtime_diagnostics("after_services_start");
 
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        service_deferred_events();
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

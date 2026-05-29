@@ -13,12 +13,21 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - Servidor `esp_http_server` com dashboard, páginas HTML e rotas de demonstração.
 - Eventos em RAM para boot, Wi-Fi, NAT, SNTP, demos e sinais `SECURITY` didáticos, com polling normal filtrado para reduzir ruído.
 - SNTP iniciado após `IP_EVENT_STA_GOT_IP`, usando `pool.ntp.org` e `time.google.com`, com timezone documentado como `America/Sao_Paulo`.
-- DNS monitor/proxy didático em UDP 53; o AP entrega `192.168.4.1` como DNS via DHCP e encaminha consultas para `1.1.1.1` com fallback `8.8.8.8`.
+- DNS monitor/proxy didático e experimental em UDP 53; o AP entrega `192.168.4.1` como DNS via DHCP e encaminha consultas para `1.1.1.1` com fallback `8.8.8.8`.
 - `/api/status` com estado operacional da PoC, `time.*`, resumo `dns.*`, contadores HTTP, `last_route`, `top_routes` sempre como array e limitações.
 - `/api/dns` e `/dns` com total de consultas, histórico recente, cliente, domínio, tipo, uptime/timestamp e flags didáticas de suspeita.
 - `/traffic`, `/logs` e `/report` em HTML local sem CDN; `/traffic` compensa a filtragem dos logs mostrando total requests, DNS queries e top routes.
 - Rotas sensíveis didáticas: `/admin`, `/login`, `/wp-admin`, `/etc/passwd`, `/api`, `/config` e `/debug`.
 - Rotas de demo: `/demo`, `/demo/scan`, `/demo/security` e `/demo/info`.
+
+## Hardening de estabilidade
+
+- `esp_http_server` usa stack ampliada para reduzir risco de overflow observado em bancada.
+- Snapshots maiores de DNS foram movidos para heap e handlers JSON mantêm checagem de alocação.
+- Task DNS usa stack ampliada, buffers no heap e timeout curto para o DNS upstream.
+- Eventos DNS comuns ficam no ring buffer próprio; o log de eventos recebe apenas primeiro DNS observado e domínios suspeitos.
+- Reconexão STA usa backoff simples processado no loop principal, fora do callback de disconnect.
+- Próximo teste de bancada deve priorizar 2 minutos com celular conectado, navegação e `/dns` aberto sem reboot.
 
 ## Critérios de aceite
 
@@ -54,6 +63,6 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - NAT não implementa inspeção HTTPS, sniffing de conteúdo nem firewall profissional.
 - DNS monitor mostra domínios consultados; HTTPS continua criptografado e o conteúdo das páginas não é lido.
 - IDS/Traffic v0.3 é didático: usa rotas HTTP controladas, consultas DNS e contadores em RAM, sem bloqueio real de tráfego roteado.
-- Proxy DNS é mínimo e de melhor esforço; a sprint cobre consultas A/AAAA simples e detecção por lista didática, sem bloqueio.
-- Eventos são RAM-only e filtrados para não registrar polling normal de `/`, `/api/status`, `/api/events`, `/logs`, `/traffic` e `/report`.
+- Proxy DNS é mínimo, experimental e de melhor esforço; a sprint cobre consultas A/AAAA simples e detecção por lista didática, sem bloqueio.
+- Eventos são RAM-only e filtrados para não registrar polling normal de `/`, `/api/status`, `/api/events`, `/api/dns`, `/logs`, `/traffic`, `/dns` e `/report`.
 - Flash mismatch `Expected 4MB, found 2MB` é pendência de bancada; não mexer em flash size nem partições até confirmação física.
