@@ -52,6 +52,14 @@
 #define DNS_CLIENT_LEN 24
 #define DNS_PACKET_MAX 512
 #define DNS_PROXY_PORT 53
+#define IDS_CLIENT_CAPACITY 8
+#define IDS_DOMAIN_HASH_CAPACITY 8
+#define IDS_EVENT_LABEL_LEN 32
+#define IDS_DNS_BURST_WINDOW_MS 10000ULL
+#define IDS_DNS_BURST_THRESHOLD 20U
+#define IDS_DNS_BURST_COOLDOWN_MS 60000ULL
+#define IDS_UNIQUE_DOMAIN_THRESHOLD 8U
+#define IDS_RISK_MAX 100U
 
 typedef struct {
     uint32_t id;
@@ -72,6 +80,8 @@ typedef struct {
     uint64_t api_status;
     uint64_t logs;
     uint64_t api_events;
+    uint64_t clients;
+    uint64_t api_clients;
     uint64_t traffic;
     uint64_t report;
     uint64_t demo;
@@ -103,6 +113,25 @@ typedef struct {
     bool suspicious;
 } dns_query_t;
 
+typedef struct {
+    bool active;
+    char client_ip[DNS_CLIENT_LEN];
+    uint64_t first_seen_ms;
+    uint64_t last_seen_ms;
+    uint64_t dns_query_count;
+    uint32_t suspicious_dns_count;
+    uint16_t unique_domain_count;
+    uint32_t domain_hashes[IDS_DOMAIN_HASH_CAPACITY];
+    uint8_t domain_hash_write_index;
+    char last_domain[DNS_DOMAIN_LEN];
+    uint8_t risk_score;
+    char last_event_label[IDS_EVENT_LABEL_LEN];
+    uint64_t burst_window_start_ms;
+    uint16_t burst_window_count;
+    uint64_t last_burst_event_ms;
+    bool unique_risk_applied;
+} ids_client_t;
+
 static const char *TAG = "appliance_v2";
 static esp_netif_t *ap_netif = NULL;
 static esp_netif_t *sta_netif = NULL;
@@ -115,11 +144,14 @@ static uint32_t event_write_index = 0;
 static traffic_counters_t traffic = {0};
 static route_stat_t route_stats[ROUTE_TRACK_CAPACITY] = {0};
 static dns_query_t dns_queries[DNS_RECENT_CAPACITY] = {0};
+static ids_client_t ids_clients[IDS_CLIENT_CAPACITY] = {0};
 static uint32_t dns_query_count = 0;
 static uint32_t dns_write_index = 0;
 static uint32_t dns_next_id = 1;
 static uint64_t dns_total_queries = 0;
 static uint64_t suspicious_dns_count = 0;
+static uint32_t total_clients_seen = 0;
+static uint64_t dns_burst_count = 0;
 static bool dns_monitoring_enabled = false;
 static bool dns_first_observed = false;
 static char dns_last_domain[DNS_DOMAIN_LEN] = "";
@@ -420,6 +452,10 @@ static void increment_route_counter(const char *route)
         traffic.logs++;
     } else if (strcmp(route, "/api/events") == 0) {
         traffic.api_events++;
+    } else if (strcmp(route, "/clients") == 0) {
+        traffic.clients++;
+    } else if (strcmp(route, "/api/clients") == 0) {
+        traffic.api_clients++;
     } else if (strcmp(route, "/api/dns") == 0 || strcmp(route, "/dns") == 0) {
         traffic.api++;
     } else if (strcmp(route, "/traffic") == 0) {
@@ -520,6 +556,172 @@ static const char *dns_query_type_label(uint16_t qtype)
     }
 }
 
+
+static uint32_t hash_domain(const char *domain)
+{
+    uint32_t hash = 2166136261U;
+    if (domain == NULL) {
+        return hash;
+    }
+    for (size_t i = 0; domain[i] != '\0'; i++) {
+        char c = domain[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c + 32);
+        }
+        hash ^= (uint8_t)c;
+        hash *= 16777619U;
+    }
+    return hash == 0 ? 1U : hash;
+}
+
+static const char *risk_classification(uint8_t score)
+{
+    if (score >= 15U) {
+        return "suspeito";
+    }
+    if (score >= 5U) {
+        return "atencao";
+    }
+    return "baixo";
+}
+
+static void ids_add_score_locked(ids_client_t *client, uint8_t delta, const char *label)
+{
+    if (client == NULL || delta == 0) {
+        return;
+    }
+    uint16_t next = (uint16_t)client->risk_score + delta;
+    client->risk_score = next > IDS_RISK_MAX ? IDS_RISK_MAX : (uint8_t)next;
+    if (label != NULL) {
+        strlcpy(client->last_event_label, label, sizeof(client->last_event_label));
+    }
+}
+
+static ids_client_t *ids_get_client_locked(const char *client_ip, uint64_t now_ms)
+{
+    ids_client_t *oldest = &ids_clients[0];
+    for (uint32_t i = 0; i < IDS_CLIENT_CAPACITY; i++) {
+        ids_client_t *client = &ids_clients[i];
+        if (client->active && strcmp(client->client_ip, client_ip) == 0) {
+            return client;
+        }
+        if (!client->active) {
+            memset(client, 0, sizeof(*client));
+            client->active = true;
+            strlcpy(client->client_ip, client_ip, sizeof(client->client_ip));
+            client->first_seen_ms = now_ms;
+            client->last_seen_ms = now_ms;
+            strlcpy(client->last_event_label, "observed", sizeof(client->last_event_label));
+            total_clients_seen++;
+            return client;
+        }
+        if (client->last_seen_ms < oldest->last_seen_ms) {
+            oldest = client;
+        }
+    }
+
+    memset(oldest, 0, sizeof(*oldest));
+    oldest->active = true;
+    strlcpy(oldest->client_ip, client_ip, sizeof(oldest->client_ip));
+    oldest->first_seen_ms = now_ms;
+    oldest->last_seen_ms = now_ms;
+    strlcpy(oldest->last_event_label, "observed_reused_slot", sizeof(oldest->last_event_label));
+    total_clients_seen++;
+    return oldest;
+}
+
+static bool ids_record_unique_domain_locked(ids_client_t *client, const char *domain)
+{
+    if (client == NULL || domain == NULL || domain[0] == '\0') {
+        return false;
+    }
+    uint32_t hash = hash_domain(domain);
+    for (uint32_t i = 0; i < IDS_DOMAIN_HASH_CAPACITY; i++) {
+        if (client->domain_hashes[i] == hash) {
+            return false;
+        }
+    }
+    client->domain_hashes[client->domain_hash_write_index] = hash;
+    client->domain_hash_write_index = (client->domain_hash_write_index + 1U) % IDS_DOMAIN_HASH_CAPACITY;
+    if (client->unique_domain_count < UINT16_MAX) {
+        client->unique_domain_count++;
+    }
+    return true;
+}
+
+static void ids_record_dns_query_locked(const char *client_ip, const char *domain, bool suspicious, uint64_t now_ms, bool *burst_detected)
+{
+    if (burst_detected != NULL) {
+        *burst_detected = false;
+    }
+    ids_client_t *client = ids_get_client_locked(client_ip, now_ms);
+    client->last_seen_ms = now_ms;
+    client->dns_query_count++;
+    strlcpy(client->last_domain, domain, sizeof(client->last_domain));
+
+    if (suspicious) {
+        client->suspicious_dns_count++;
+        ids_add_score_locked(client, 5U, "suspicious_dns");
+    }
+
+    bool new_domain = ids_record_unique_domain_locked(client, domain);
+    if (new_domain && client->unique_domain_count >= IDS_UNIQUE_DOMAIN_THRESHOLD && !client->unique_risk_applied) {
+        ids_add_score_locked(client, 2U, "many_unique_domains");
+        client->unique_risk_applied = true;
+    }
+
+    if (client->burst_window_start_ms == 0 || now_ms - client->burst_window_start_ms > IDS_DNS_BURST_WINDOW_MS) {
+        client->burst_window_start_ms = now_ms;
+        client->burst_window_count = 1;
+    } else if (client->burst_window_count < UINT16_MAX) {
+        client->burst_window_count++;
+    }
+
+    if (client->burst_window_count >= IDS_DNS_BURST_THRESHOLD &&
+        (client->last_burst_event_ms == 0 || now_ms - client->last_burst_event_ms >= IDS_DNS_BURST_COOLDOWN_MS)) {
+        ids_add_score_locked(client, 1U, "dns_burst");
+        client->last_burst_event_ms = now_ms;
+        dns_burst_count++;
+        if (burst_detected != NULL) {
+            *burst_detected = true;
+        }
+    }
+}
+
+static void ids_summary_locked(uint32_t *active_clients, uint8_t *highest_score, char *highest_client, size_t highest_client_len, char *last_domain, size_t last_domain_len)
+{
+    uint32_t active = 0;
+    uint8_t high_score = 0;
+    const ids_client_t *high = NULL;
+    const ids_client_t *last = NULL;
+    for (uint32_t i = 0; i < IDS_CLIENT_CAPACITY; i++) {
+        const ids_client_t *client = &ids_clients[i];
+        if (!client->active) {
+            continue;
+        }
+        active++;
+        if (high == NULL || client->risk_score > high_score) {
+            high = client;
+            high_score = client->risk_score;
+        }
+        if (last == NULL || client->last_seen_ms > last->last_seen_ms) {
+            last = client;
+        }
+    }
+    if (active_clients != NULL) {
+        *active_clients = active;
+    }
+    if (highest_score != NULL) {
+        *highest_score = high_score;
+    }
+    if (highest_client != NULL && highest_client_len > 0) {
+        strlcpy(highest_client, high != NULL ? high->client_ip : "n/d", highest_client_len);
+    }
+    if (last_domain != NULL && last_domain_len > 0) {
+        strlcpy(last_domain, last != NULL ? last->last_domain : "", last_domain_len);
+    }
+}
+
 static bool is_suspicious_domain(const char *domain)
 {
     return strcasecmp(domain, "malware.test") == 0 ||
@@ -587,6 +789,7 @@ static void record_dns_query(const char *client, const char *domain, const char 
     bool synced = false;
     bool suspicious = is_suspicious_domain(domain);
     bool first_observed = false;
+    bool burst_detected = false;
     uint64_t total_after = 0;
     uint64_t suspicious_after = 0;
     uint64_t now_ms = uptime_ms();
@@ -622,6 +825,7 @@ static void record_dns_query(const char *client, const char *domain, const char 
     if (dns_query_count < DNS_RECENT_CAPACITY) {
         dns_query_count++;
     }
+    ids_record_dns_query_locked(client, domain, suspicious, now_ms, &burst_detected);
     xSemaphoreGive(state_mutex);
 
     if (first_observed) {
@@ -632,6 +836,9 @@ static void record_dns_query(const char *client, const char *domain, const char 
                   domain, client, query_type,
                   (unsigned long long)total_after,
                   (unsigned long long)suspicious_after);
+    }
+    if (burst_detected) {
+        add_event("SECURITY", "ids", "DNS burst detected from %s", client);
     }
 }
 
@@ -871,8 +1078,8 @@ static esp_err_t root_handler(httpd_req_t *req)
         "async function load(){const s=await fetch('/api/status').then(r=>r.json());"
         "document.getElementById('cards').innerHTML=["
         "['AP',s.ap.ssid+' / '+s.ap.ip],['Upstream',s.upstream.connected?s.upstream.ip:(s.upstream.configured?'conectando':'n/d')],"
-        "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Clientes',s.clients.count],"
-        "['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio',s.dns.last_domain||'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
+        "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Clientes AP',s.clients.count],['Clientes observados',s.clients_observed.total_clients_seen],['Maior risk',s.clients_observed.highest_risk_score],"
+        "['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio IDS',s.clients_observed.last_domain||'n/d'],['Último domínio',s.dns.last_domain||'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
         "].map(c=>card(c[0],c[1])).join('');"
         "document.getElementById('routes').innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');"
         "const e=await fetch('/api/events').then(r=>r.json());"
@@ -888,7 +1095,8 @@ static esp_err_t status_handler(httpd_req_t *req)
         "Dashboard: /\n"
         "JSON: /api/status\n"
         "Eventos: /api/events\n"
-        "DNS: /dns e /api/dns\n");
+        "DNS: /dns e /api/dns\n"
+        "Clientes: /clients e /api/clients\n");
 }
 
 static esp_err_t api_status_handler(httpd_req_t *req)
@@ -908,6 +1116,13 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     uint64_t dns_total_snapshot = dns_total_queries;
     uint64_t suspicious_dns_snapshot = suspicious_dns_count;
     bool dns_enabled_snapshot = dns_monitoring_enabled;
+    uint32_t ids_active_clients = 0;
+    uint8_t ids_highest_score = 0;
+    uint32_t total_clients_seen_snapshot = total_clients_seen;
+    uint64_t dns_burst_snapshot = dns_burst_count;
+    char ids_highest_client[DNS_CLIENT_LEN];
+    char ids_last_domain[DNS_DOMAIN_LEN];
+    ids_summary_locked(&ids_active_clients, &ids_highest_score, ids_highest_client, sizeof(ids_highest_client), ids_last_domain, sizeof(ids_last_domain));
     char dns_domain_snapshot[DNS_DOMAIN_LEN];
     char dns_client_snapshot[DNS_CLIENT_LEN];
     char dns_type_snapshot[DNS_QUERY_TYPE_LEN];
@@ -937,6 +1152,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     char dns_domain_json[DNS_DOMAIN_LEN * 2];
     char dns_client_json[DNS_CLIENT_LEN * 2];
     char dns_type_json[DNS_QUERY_TYPE_LEN * 2];
+    char ids_highest_client_json[DNS_CLIENT_LEN * 2];
+    char ids_last_domain_json[DNS_DOMAIN_LEN * 2];
     char current_timestamp[TIMESTAMP_LEN];
     bool current_time_synced = false;
     snapshot_time(current_timestamp, sizeof(current_timestamp), &current_time_synced);
@@ -948,6 +1165,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     json_escape_string(dns_domain_snapshot, dns_domain_json, sizeof(dns_domain_json));
     json_escape_string(dns_client_snapshot, dns_client_json, sizeof(dns_client_json));
     json_escape_string(dns_type_snapshot, dns_type_json, sizeof(dns_type_json));
+    json_escape_string(ids_highest_client, ids_highest_client_json, sizeof(ids_highest_client_json));
+    json_escape_string(ids_last_domain, ids_last_domain_json, sizeof(ids_last_domain_json));
 
     size_t used = snprintf(json, 12288,
         "{"
@@ -961,8 +1180,10 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         "\"upstream\":{\"configured\":%s,\"connecting\":%s,\"connected\":%s,\"ip\":\"%s\",\"gateway\":\"%s\",\"netmask\":\"%s\",\"last_disconnect_reason\":%u},"
         "\"nat\":{\"compiled\":%s,\"attempted\":%s,\"active\":%s},"
         "\"clients\":{\"count\":%u},"
+        "\"clients_observed\":{\"active\":%lu,\"total_clients_seen\":%lu,\"highest_risk_score\":%u,\"highest_risk_client\":\"%s\",\"last_domain\":\"%s\",\"dns_burst_count\":%llu,\"suspicious_dns_count\":%llu},"
+        "\"ids\":{\"active_clients\":%lu,\"total_clients_seen\":%lu,\"highest_risk_score\":%u,\"highest_risk_client\":\"%s\",\"dns_burst_count\":%llu,\"suspicious_dns_count\":%llu},"
         "\"dns\":{\"monitoring_enabled\":%s,\"total_queries\":%llu,\"suspicious_count\":%llu,\"last_domain\":\"%s\",\"last_client\":\"%s\",\"last_query_type\":\"%s\"},"
-        "\"traffic\":{\"total\":%llu,\"root\":%llu,\"status\":%llu,\"api\":%llu,\"api_status\":%llu,\"logs\":%llu,\"api_events\":%llu,\"traffic\":%llu,\"report\":%llu,\"demo\":%llu,\"demo_scan\":%llu,\"demo_security\":%llu,\"demo_info\":%llu,\"favicon\":%llu,\"not_found\":%llu,\"sensitive_path_hits\":%llu,\"suspicious_scan_count\":%llu,\"demo_scan_count\":%llu,\"last_route\":\"%s\",\"top_routes\":[",
+        "\"traffic\":{\"total\":%llu,\"root\":%llu,\"status\":%llu,\"api\":%llu,\"api_status\":%llu,\"logs\":%llu,\"api_events\":%llu,\"traffic\":%llu,\"report\":%llu,\"clients\":%llu,\"api_clients\":%llu,\"demo\":%llu,\"demo_scan\":%llu,\"demo_security\":%llu,\"demo_info\":%llu,\"favicon\":%llu,\"not_found\":%llu,\"sensitive_path_hits\":%llu,\"suspicious_scan_count\":%llu,\"demo_scan_count\":%llu,\"last_route\":\"%s\",\"top_routes\":[",
         project_json,
         version_json,
         (unsigned long long)uptime_ms(),
@@ -991,6 +1212,19 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         nat_attempted_snapshot ? "true" : "false",
         nat_active_snapshot ? "true" : "false",
         clients,
+        (unsigned long)ids_active_clients,
+        (unsigned long)total_clients_seen_snapshot,
+        ids_highest_score,
+        ids_highest_client_json,
+        ids_last_domain_json,
+        (unsigned long long)dns_burst_snapshot,
+        (unsigned long long)suspicious_dns_snapshot,
+        (unsigned long)ids_active_clients,
+        (unsigned long)total_clients_seen_snapshot,
+        ids_highest_score,
+        ids_highest_client_json,
+        (unsigned long long)dns_burst_snapshot,
+        (unsigned long long)suspicious_dns_snapshot,
         dns_enabled_snapshot ? "true" : "false",
         (unsigned long long)dns_total_snapshot,
         (unsigned long long)suspicious_dns_snapshot,
@@ -1006,6 +1240,8 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         (unsigned long long)traffic_snapshot.api_events,
         (unsigned long long)traffic_snapshot.traffic,
         (unsigned long long)traffic_snapshot.report,
+        (unsigned long long)traffic_snapshot.clients,
+        (unsigned long long)traffic_snapshot.api_clients,
         (unsigned long long)traffic_snapshot.demo,
         (unsigned long long)traffic_snapshot.demo_scan,
         (unsigned long long)traffic_snapshot.demo_security,
@@ -1153,6 +1389,96 @@ static esp_err_t api_dns_handler(httpd_req_t *req)
     return ret;
 }
 
+
+static esp_err_t api_clients_handler(httpd_req_t *req)
+{
+    increment_route_counter("/api/clients");
+    char *json = calloc(1, 8192);
+    ids_client_t *snapshot = calloc(IDS_CLIENT_CAPACITY, sizeof(ids_client_t));
+    if (json == NULL || snapshot == NULL) {
+        free(json);
+        free(snapshot);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
+
+    uint32_t total_seen_snapshot = 0;
+    uint64_t burst_snapshot = 0;
+    uint64_t suspicious_snapshot = 0;
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    memcpy(snapshot, ids_clients, IDS_CLIENT_CAPACITY * sizeof(ids_client_t));
+    total_seen_snapshot = total_clients_seen;
+    burst_snapshot = dns_burst_count;
+    suspicious_snapshot = suspicious_dns_count;
+    xSemaphoreGive(state_mutex);
+
+    size_t used = snprintf(json, 8192,
+        "{\"total_clients_seen\":%lu,\"dns_burst_count\":%llu,\"suspicious_dns_count\":%llu,\"clients\":[",
+        (unsigned long)total_seen_snapshot,
+        (unsigned long long)burst_snapshot,
+        (unsigned long long)suspicious_snapshot);
+
+    bool first = true;
+    for (uint32_t i = 0; i < IDS_CLIENT_CAPACITY && used < 7800; i++) {
+        ids_client_t *client = &snapshot[i];
+        if (!client->active) {
+            continue;
+        }
+        char ip_json[DNS_CLIENT_LEN * 2];
+        char domain_json[DNS_DOMAIN_LEN * 2];
+        char event_json[IDS_EVENT_LABEL_LEN * 2];
+        char first_label[16];
+        char last_label[16];
+        json_escape_string(client->client_ip, ip_json, sizeof(ip_json));
+        json_escape_string(client->last_domain, domain_json, sizeof(domain_json));
+        json_escape_string(client->last_event_label, event_json, sizeof(event_json));
+        format_uptime_label(client->first_seen_ms, first_label, sizeof(first_label));
+        format_uptime_label(client->last_seen_ms, last_label, sizeof(last_label));
+        used += snprintf(json + used, 8192 - used,
+            "%s{\"client_ip\":\"%s\",\"first_seen_ms\":%llu,\"first_seen\":\"%s\",\"last_seen_ms\":%llu,\"last_seen\":\"%s\",\"dns_query_count\":%llu,\"suspicious_dns_count\":%lu,\"unique_domain_count\":%u,\"last_domain\":\"%s\",\"risk_score\":%u,\"classification\":\"%s\",\"last_event_label\":\"%s\"}",
+            first ? "" : ",",
+            ip_json,
+            (unsigned long long)client->first_seen_ms,
+            first_label,
+            (unsigned long long)client->last_seen_ms,
+            last_label,
+            (unsigned long long)client->dns_query_count,
+            (unsigned long)client->suspicious_dns_count,
+            client->unique_domain_count,
+            domain_json,
+            client->risk_score,
+            risk_classification(client->risk_score),
+            event_json);
+        first = false;
+    }
+
+    snprintf(json + used, 8192 - used,
+        "],\"limitations\":[\"ram_only\",\"dns_metadata_only\",\"no_https_content_inspection\",\"small_client_capacity\",\"approximate_unique_domains\",\"heuristic_score_only\"]}");
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, json);
+    free(snapshot);
+    free(json);
+    return ret;
+}
+
+static esp_err_t clients_handler(httpd_req_t *req)
+{
+    increment_route_counter("/clients");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_sendstr_chunk(req, "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Clientes</title><style>");
+    httpd_resp_sendstr_chunk(req, html_style);
+    httpd_resp_sendstr_chunk(req,
+        "</style></head><body><header><h1>Clientes observados</h1><div>IDS didático baseado em metadados DNS dos clientes do AP.</div>"
+        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/dns\">DNS</a><a href=\"/logs\">Logs</a><a href=\"/api/clients\">JSON</a></nav></header>"
+        "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Tabela de clientes</h2><table><thead><tr><th>IP</th><th>Primeiro visto</th><th>Último visto</th><th>DNS</th><th>Suspeitas</th><th>Último domínio</th><th>Score</th><th>Classificação</th></tr></thead><tbody id=\"clientRows\"></tbody></table></section>"
+        "<section class=\"card\"><p>O score é heurístico e didático. O sistema usa DNS/metadados observáveis e não inspeciona conteúdo HTTPS.</p></section></main>"
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
+        "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
+        "function row(x){return '<tr><td>'+escapeHtml(x.client_ip)+'</td><td>'+escapeHtml(x.first_seen)+'</td><td>'+escapeHtml(x.last_seen)+'</td><td>'+Number(x.dns_query_count||0)+'</td><td>'+Number(x.suspicious_dns_count||0)+'</td><td><code>'+escapeHtml(x.last_domain||'n/d')+'</code></td><td>'+Number(x.risk_score||0)+'</td><td>'+escapeHtml(x.classification)+'</td></tr>'; }"
+        "async function load(){const d=await fetch('/api/clients').then(r=>r.json());const cs=d.clients||[];const high=cs.reduce((a,c)=>Number(c.risk_score||0)>Number(a.risk_score||0)?c:a,{});cards.innerHTML=[['Clientes vistos',d.total_clients_seen],['Ativos em RAM',cs.length],['Maior score',high.risk_score||0],['Cliente maior risco',high.client_ip||'n/d'],['DNS burst',d.dns_burst_count],['DNS suspeito',d.suspicious_dns_count]].map(c=>card(c[0],c[1])).join('');clientRows.innerHTML=cs.map(row).join('');}load();setInterval(load,5000);</script></body></html>");
+    return httpd_resp_sendstr_chunk(req, NULL);
+}
+
 static esp_err_t dns_handler(httpd_req_t *req)
 {
     increment_route_counter("/dns");
@@ -1196,9 +1522,9 @@ static esp_err_t traffic_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, html_style);
     httpd_resp_sendstr_chunk(req,
         "</style></head><body><header><h1>Traffic</h1><div>Contadores HTTP e sinais simples de varredura.</div>"
-        "<nav><a href=\"/\">Dashboard</a><a href=\"/logs\">Logs</a><a href=\"/demo/scan\">Demo scan</a><a href=\"/api/status\">JSON</a></nav></header>"
+        "<nav><a href=\"/\">Dashboard</a><a href=\"/logs\">Logs</a><a href=\"/clients\">Clientes</a><a href=\"/demo/scan\">Demo scan</a><a href=\"/api/status\">JSON</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Top routes</h2><table><thead><tr><th>Rota</th><th>Hits</th></tr></thead><tbody id=\"routes\"></tbody></table></section></main>"
-        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio',s.dns.last_domain||'n/d'],['Último cliente DNS',s.dns.last_client||'n/d'],['DNS suspeito',s.dns.suspicious_count],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>card(c[0],c[1])).join('');routes.innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');}load();setInterval(load,5000);</script></body></html>");
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Clientes observados',s.clients_observed.total_clients_seen],['Maior score',s.clients_observed.highest_risk_score],['DNS burst',s.clients_observed.dns_burst_count],['Último domínio',s.dns.last_domain||'n/d'],['Último cliente DNS',s.dns.last_client||'n/d'],['DNS suspeito',s.dns.suspicious_count],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>card(c[0],c[1])).join('');routes.innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');}load();setInterval(load,5000);</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -1213,10 +1539,10 @@ static esp_err_t report_handler(httpd_req_t *req)
         "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/dns\">DNS</a><a href=\"/api/status\">JSON</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section>"
         "<section class=\"card\"><h2>Escopo validado</h2><table><tr><td>AP+STA</td><td>AP fixo em 192.168.4.1 e STA opcional.</td></tr><tr><td>NAPT</td><td>Habilitado somente após IP válido no STA.</td></tr><tr><td>IDS didático</td><td>Contadores HTTP e DNS em RAM para demonstração.</td></tr><tr><td>Limitação</td><td>Não é firewall profissional e não inspeciona HTTPS.</td></tr></table></section>"
-        "<section class=\"card\"><h2>DNS/Tráfego observado</h2><table><tr><td>Monitor DNS</td><td>Registra consultas de domínio feitas por clientes do AP via proxy DNS local.</td></tr><tr><td>Privacidade</td><td>HTTPS continua criptografado; o sistema não lê conteúdo das páginas.</td></tr><tr><td>Escopo</td><td>Detecção didática por domínios de teste suspeitos, sem bloqueio nesta sprint.</td></tr></table></section></main>"
+        "<section class=\"card\"><h2>DNS/Tráfego observado</h2><table><tr><td>Monitor DNS</td><td>Registra consultas de domínio feitas por clientes do AP via proxy DNS local.</td></tr><tr><td>Privacidade</td><td>HTTPS continua criptografado; o sistema não lê conteúdo das páginas.</td></tr><tr><td>Escopo</td><td>Detecção didática por domínios de teste suspeitos, sem bloqueio nesta sprint.</td></tr></table></section><section class=\"card\"><h2>Clientes e risco didático</h2><table><tr><td>Score</td><td>Heurística didática em RAM: +5 por domínio suspeito, +1 por burst DNS e +2 por muitos domínios únicos aproximados.</td></tr><tr><td>Classificação</td><td>0-4 baixo, 5-14 atenção, 15+ suspeito.</td></tr><tr><td>Limitação</td><td>Usa DNS/metadados observáveis e não inspeciona HTTPS nem conteúdo de páginas.</td></tr></table></section></main>"
         "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
         "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
-        "fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['Heap livre',s.heap_free],['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['DNS suspeito',s.dns.suspicious_count],['Último domínio',s.dns.last_domain||'n/d']].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
+        "fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['Heap livre',s.heap_free],['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio IDS',s.clients_observed.last_domain||'n/d'],['DNS suspeito',s.dns.suspicious_count],['Último domínio',s.dns.last_domain||'n/d']].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -1229,9 +1555,9 @@ static esp_err_t api_index_handler(httpd_req_t *req)
         "{\"apis\":["
         "{\"path\":\"/api/status\",\"type\":\"status\"},"
         "{\"path\":\"/api/events\",\"type\":\"events\"},"
-        "{\"path\":\"/api/dns\",\"type\":\"dns\"},"
+        "{\"path\":\"/api/dns\",\"type\":\"dns\"},{\"path\":\"/api/clients\",\"type\":\"clients\"},"
         "{\"path\":\"/traffic\",\"type\":\"html\"},"
-        "{\"path\":\"/dns\",\"type\":\"html\"},"
+        "{\"path\":\"/dns\",\"type\":\"html\"},{\"path\":\"/clients\",\"type\":\"html\"},"
         "{\"path\":\"/logs\",\"type\":\"html\"},"
         "{\"path\":\"/report\",\"type\":\"html\"}"
         "],\"note\":\"/api e tratado tambem como rota sensivel para fins didaticos\"}");
@@ -1313,7 +1639,9 @@ static void start_http_server(void)
         {.uri = "/logs", .method = HTTP_GET, .handler = logs_handler, .user_ctx = NULL},
         {.uri = "/api/events", .method = HTTP_GET, .handler = api_events_handler, .user_ctx = NULL},
         {.uri = "/api/dns", .method = HTTP_GET, .handler = api_dns_handler, .user_ctx = NULL},
+        {.uri = "/api/clients", .method = HTTP_GET, .handler = api_clients_handler, .user_ctx = NULL},
         {.uri = "/dns", .method = HTTP_GET, .handler = dns_handler, .user_ctx = NULL},
+        {.uri = "/clients", .method = HTTP_GET, .handler = clients_handler, .user_ctx = NULL},
         {.uri = "/traffic", .method = HTTP_GET, .handler = traffic_handler, .user_ctx = NULL},
         {.uri = "/report", .method = HTTP_GET, .handler = report_handler, .user_ctx = NULL},
         {.uri = "/demo", .method = HTTP_GET, .handler = demo_handler, .user_ctx = NULL},
