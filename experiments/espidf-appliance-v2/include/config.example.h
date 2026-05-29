@@ -30,3 +30,21 @@
 #define APPLIANCE_V2_DISPLAY_PIN_DC -1
 #define APPLIANCE_V2_DISPLAY_PIN_RST -1
 #define APPLIANCE_V2_DISPLAY_PIN_BL -1
+
+/*
+ * Template local para teste fisico do display.
+ * Use somente em include/config.local.h, depois de confirmar controlador,
+ * resolucao e pinout do modulo real. Nao versionar config.local.h.
+ *
+ * #define APPLIANCE_V2_ENABLE_DISPLAY 1
+ * #define APPLIANCE_V2_DISPLAY_WIDTH 240
+ * #define APPLIANCE_V2_DISPLAY_HEIGHT 240
+ * #define APPLIANCE_V2_DISPLAY_DRIVER APPLIANCE_V2_DISPLAY_DRIVER_ST7789
+ * #define APPLIANCE_V2_DISPLAY_PIN_MOSI <GPIO_MOSI_CONFIRMADO>
+ * #define APPLIANCE_V2_DISPLAY_PIN_MISO -1
+ * #define APPLIANCE_V2_DISPLAY_PIN_SCLK <GPIO_SCLK_CONFIRMADO>
+ * #define APPLIANCE_V2_DISPLAY_PIN_CS <GPIO_CS_CONFIRMADO>
+ * #define APPLIANCE_V2_DISPLAY_PIN_DC <GPIO_DC_CONFIRMADO>
+ * #define APPLIANCE_V2_DISPLAY_PIN_RST <GPIO_RST_CONFIRMADO_OU_-1>
+ * #define APPLIANCE_V2_DISPLAY_PIN_BL <GPIO_BL_CONFIRMADO_OU_-1>
+ */

@@ -34,23 +34,39 @@ Copie `include/config.example.h` para `include/config.local.h` e ajuste a rede u
 
 A v2 tem uma camada defensiva de display local, desabilitada por padrao porque o controlador e o pinout do ESP32 com tela integrada ainda nao foram confirmados no repositorio. Sem configuracao explicita, o firmware mantem AP, NAT, DNS e HTTP funcionando como antes.
 
-Para testar em bancada, preencha apenas em `include/config.local.h`:
+Para testar em bancada, copie `include/config.example.h` para `include/config.local.h` e habilite o display somente depois de confirmar controlador, resolucao e pinout do modulo real. O Git deve continuar com `APPLIANCE_V2_ENABLE_DISPLAY 0` em `config.h` e `config.example.h`.
+
+Use o bloco comentado no final de `config.example.h` como template local. Exemplo do formato, sem assumir GPIOs reais:
 
 ```c
 #define APPLIANCE_V2_ENABLE_DISPLAY 1
 #define APPLIANCE_V2_DISPLAY_WIDTH 240
 #define APPLIANCE_V2_DISPLAY_HEIGHT 240
 #define APPLIANCE_V2_DISPLAY_DRIVER APPLIANCE_V2_DISPLAY_DRIVER_ST7789
-#define APPLIANCE_V2_DISPLAY_PIN_MOSI 23
+#define APPLIANCE_V2_DISPLAY_PIN_MOSI <GPIO_MOSI_CONFIRMADO>
 #define APPLIANCE_V2_DISPLAY_PIN_MISO -1
-#define APPLIANCE_V2_DISPLAY_PIN_SCLK 18
-#define APPLIANCE_V2_DISPLAY_PIN_CS 5
-#define APPLIANCE_V2_DISPLAY_PIN_DC 16
-#define APPLIANCE_V2_DISPLAY_PIN_RST 17
-#define APPLIANCE_V2_DISPLAY_PIN_BL 4
+#define APPLIANCE_V2_DISPLAY_PIN_SCLK <GPIO_SCLK_CONFIRMADO>
+#define APPLIANCE_V2_DISPLAY_PIN_CS <GPIO_CS_CONFIRMADO>
+#define APPLIANCE_V2_DISPLAY_PIN_DC <GPIO_DC_CONFIRMADO>
+#define APPLIANCE_V2_DISPLAY_PIN_RST <GPIO_RST_CONFIRMADO_OU_-1>
+#define APPLIANCE_V2_DISPLAY_PIN_BL <GPIO_BL_CONFIRMADO_OU_-1>
 ```
 
-Os drivers leves previstos sao `APPLIANCE_V2_DISPLAY_DRIVER_ST7789` e `APPLIANCE_V2_DISPLAY_DRIVER_ILI9341`, ambos via SPI do ESP-IDF. Os pinos acima sao exemplo e nao devem ser usados sem conferir o modulo real. Se algum pino obrigatorio ficar `-1` ou o SPI falhar, o display fica `available=false` e o firmware continua rodando.
+Os drivers leves previstos sao `APPLIANCE_V2_DISPLAY_DRIVER_ST7789` e `APPLIANCE_V2_DISPLAY_DRIVER_ILI9341`, ambos via SPI do ESP-IDF. Se a tela ficar preta, invertida, sem backlight, ou se o firmware ficar instavel, volte `APPLIANCE_V2_ENABLE_DISPLAY` para `0` em `config.local.h` e repita o teste base de AP/DNS/HTTP/NAT/SNTP antes de nova tentativa. Se algum pino obrigatorio ficar `-1` ou o SPI falhar, o display fica `available=false` e o firmware continua rodando.
+
+### Pinout pendente de confirmacao
+
+| Sinal | Valor local | Observacao |
+| --- | --- | --- |
+| Controlador | Pendente | Confirmar ST7789, ILI9341 ou outro antes de habilitar. |
+| Resolucao | Pendente | Confirmar largura/altura fisica e orientacao. |
+| MOSI | Pendente | GPIO obrigatorio para SPI. |
+| MISO | Pendente ou `-1` | Normalmente ausente em displays SPI simples. |
+| SCLK | Pendente | GPIO obrigatorio para SPI. |
+| CS | Pendente | GPIO obrigatorio nesta camada. |
+| DC | Pendente | GPIO obrigatorio para comando/dado. |
+| RST | Pendente ou `-1` | Usar `-1` se o modulo nao expuser reset. |
+| BL | Pendente ou `-1` | Confirmar polaridade/backlight antes do teste. |
 
 Estados visuais:
 
