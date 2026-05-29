@@ -243,6 +243,26 @@ unsigned long uptimeSeconds()
     return millis() / 1000UL;
 }
 
+void formatUptimeLabel(unsigned long uptimeMs, char *target, size_t targetSize)
+{
+    if (targetSize == 0) {
+        return;
+    }
+    const unsigned long milliseconds = uptimeMs % 1000UL;
+    const unsigned long totalSeconds = uptimeMs / 1000UL;
+    const unsigned long seconds = totalSeconds % 60UL;
+    const unsigned long minutes = (totalSeconds / 60UL) % 60UL;
+    const unsigned long hours = totalSeconds / 3600UL;
+    std::snprintf(target, targetSize, "%02lu:%02lu:%02lu.%03lu", hours, minutes, seconds, milliseconds);
+}
+
+String uptimeLabel(unsigned long uptimeMs)
+{
+    char label[16];
+    formatUptimeLabel(uptimeMs, label, sizeof(label));
+    return String(label);
+}
+
 void copyText(char *target, size_t targetSize, const char *source)
 {
     if (targetSize == 0) {
@@ -352,6 +372,9 @@ void appendPersistentEventLine(String &line, const EventRecord &event)
     line += event.id;
     line += ",\"uptime_ms\":";
     line += event.uptimeMs;
+    line += ",\"time_label\":\"";
+    line += uptimeLabel(event.uptimeMs);
+    line += "\"";
     line += ",\"level\":\"";
     appendJsonEscaped(line, event.level);
     line += "\",\"source\":\"";
@@ -1255,6 +1278,9 @@ void appendEventJsonObject(String &json, const EventRecord &event)
     json += event.id;
     json += ",\"uptime_ms\":";
     json += event.uptimeMs;
+    json += ",\"time_label\":\"";
+    json += uptimeLabel(event.uptimeMs);
+    json += "\"";
     json += ",\"level\":\"";
     appendJsonEscaped(json, event.level);
     json += "\",\"source\":\"";
@@ -1376,7 +1402,7 @@ void appendEventsTableHtml(String &html, size_t limit)
     }
 
     const size_t rows = eventCount < limit ? eventCount : limit;
-    html += F("<table><thead><tr><th>ID</th><th>Uptime</th><th>Level</th><th>Source</th><th>Mensagem</th><th>Valor</th></tr></thead><tbody>");
+    html += F("<table><thead><tr><th>ID</th><th>Tempo desde boot</th><th>Level</th><th>Source</th><th>Mensagem</th><th>Valor</th></tr></thead><tbody>");
     for (size_t offset = 0; offset < rows; ++offset) {
         const size_t newestOffset = eventCount - 1 - offset;
         const size_t index = (eventStart + newestOffset) % EVENT_CAPACITY;
@@ -1384,8 +1410,8 @@ void appendEventsTableHtml(String &html, size_t limit)
         html += F("<tr><td>#");
         html += event.id;
         html += F("</td><td>");
-        html += event.uptimeMs;
-        html += F(" ms</td><td><span class=\"badge ");
+        html += uptimeLabel(event.uptimeMs);
+        html += F("</td><td><span class=\"badge ");
         html += levelClass(event.level);
         html += F("\">");
         html += event.level;
@@ -1612,7 +1638,7 @@ String reportPage()
     html += PERSISTENT_EVENTS_MAX_SIZE;
     html += F(" bytes</span></div></div><p class=\"note\">Persistencia seletiva para WARN, ERROR, SECURITY e eventos importantes.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><div class=\"table-wrap\">");
+    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><p class=\"note\">Tempo exibido em HH:MM:SS.mmm desde o boot.</p><div class=\"table-wrap\">");
     appendEventsTableHtml(html, 8);
     html += F("</div></div>");
     html += F("<div class=\"panel\"><h2>Limitacoes tecnicas</h2><ul><li>Monitoramento HTTP didatico limitado ao painel embarcado.</li><li>Nao faz sniffing de pacotes nem inspecao HTTPS.</li><li>Este prototipo nao substitui firewall/IDS profissional.</li><li>A PoC de NAT real fica em branch experimental ESP-IDF separada.</li></ul></div>");
@@ -1697,7 +1723,7 @@ String evidencePage()
     }
     html += F("</tbody></table></div></div><div class=\"panel\"><h2>Ultimos 5 eventos</h2><div class=\"table-wrap\">");
     appendEventsTableHtml(html, 5);
-    html += F("</div><p class=\"note\">Nesta fase, eventos ficam em RAM e sao perdidos ao reiniciar.</p></div></main></body></html>");
+    html += F("</div><p class=\"note\">O tempo dos eventos e relativo ao boot do ESP32; nao e horario real de calendario.</p></div></main></body></html>");
     return html;
 }
 
@@ -1714,7 +1740,7 @@ String logsPage()
     html += F("/");
     html += EVENT_CAPACITY;
     html += F("</span></div><div class=\"metric\"><strong>Persistencia</strong><span>RAM</span></div><div class=\"metric\"><strong>Uso</strong><span>diagnostico</span></div></div><p class=\"note\">Eventos demo sao simulacoes controladas para apresentacao.</p></div>");
-    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><div class=\"table-wrap\">");
+    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><p class=\"note\">Tempo exibido em HH:MM:SS.mmm desde o boot.</p><div class=\"table-wrap\">");
     appendEventsTableHtml(html, EVENT_CAPACITY);
     html += F("</div></div></main></body></html>");
     return html;
@@ -2193,7 +2219,7 @@ String buildStatusJson()
 String buildPersistentEventsJson()
 {
     String json;
-    json.reserve(PERSISTENT_EVENTS_MAX_SIZE + 220);
+    json.reserve(PERSISTENT_EVENTS_MAX_SIZE + 420);
     json += "{\"available\":";
     json += littleFsAvailable ? "true" : "false";
     json += ",\"file_size\":";
@@ -2203,35 +2229,64 @@ String buildPersistentEventsJson()
     json += ",\"path\":\"";
     json += PERSISTENT_EVENTS_PATH;
     json += "\",\"policy\":\"WARN ERROR SECURITY e eventos importantes de sistema firewall sensores e energia\"";
+    json += ",\"time_basis\":\"tempo relativo ao boot em HH:MM:SS.mmm; nao e horario real de calendario\"";
     json += ",\"rotated\":";
     json += persistentLogRotated ? "true" : "false";
     json += ",\"lines\":[";
 
+    String eventsJson;
+    eventsJson.reserve(PERSISTENT_EVENTS_MAX_SIZE + 120);
+    eventsJson += ",\"events\":[";
+    bool firstLine = true;
+    bool firstEvent = true;
     if (littleFsAvailable && LittleFS.exists(PERSISTENT_EVENTS_PATH)) {
         File file = LittleFS.open(PERSISTENT_EVENTS_PATH, "r");
-        bool first = true;
         while (file && file.available()) {
             String line = file.readStringUntil('\n');
             line.trim();
             if (line.length() == 0) {
                 continue;
             }
-            if (!first) {
+            if (!firstLine) {
                 json += ",";
             }
             json += "\"";
             appendJsonEscaped(json, line.c_str());
             json += "\"";
-            first = false;
+            firstLine = false;
+
+            if (!firstEvent) {
+                eventsJson += ",";
+            }
+            String enriched = line;
+            if (enriched.indexOf("\"time_label\"") < 0) {
+                const int keyIndex = enriched.indexOf("\"uptime_ms\":");
+                if (keyIndex >= 0) {
+                    const int valueStart = keyIndex + 12;
+                    int valueEnd = valueStart;
+                    while (valueEnd < enriched.length() && isDigit(enriched[valueEnd])) {
+                        ++valueEnd;
+                    }
+                    const unsigned long uptimeMs = enriched.substring(valueStart, valueEnd).toInt();
+                    String label = ",\"time_label\":\"" + uptimeLabel(uptimeMs) + "\"";
+                    enriched = enriched.substring(0, valueEnd) + label + enriched.substring(valueEnd);
+                }
+            }
+            eventsJson += enriched;
+            firstEvent = false;
         }
         if (file) {
             file.close();
         }
     }
 
-    json += "]}";
+    json += "]";
+    eventsJson += "]";
+    json += eventsJson;
+    json += "}";
     return json;
 }
+
 
 void handlePersistentEventsApi()
 {

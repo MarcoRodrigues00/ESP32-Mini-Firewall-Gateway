@@ -153,3 +153,9 @@ O teste continua usando apenas Python standard library e nao executa ataque real
 O smoke tester valida `/report` como HTML e `/api/report` como JSON. O schema esperado contem `project`, `version`, `system`, `gateway`, `nat`, `firewall`, `ids`, `traffic`, `storage`, `recent_events_summary` e `limitations`.
 
 `/report` e uma evidencia visual embarcada. O smoke test externo continua sendo o registro automatizado, com relatorio Markdown em `evidencias/`.
+
+## Validacao de tempo relativo
+
+O smoke tester aceita buffer vazio antes das demos. Depois de acionar rotas demo, valida que os eventos em `/api/events` mantem `uptime_ms` e incluem `time_label`. Quando `/api/events/persistent` retorna eventos parseados, tambem verifica esses campos.
+
+`time_label` e relativo ao boot e nao representa horario real de calendario.

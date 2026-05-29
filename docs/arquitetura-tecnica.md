@@ -130,3 +130,9 @@ Esse monitor nao atua em modo promiscuo, nao faz sniffing de pacotes, nao inspec
 A pagina `/report` consolida snapshots ja mantidos pelo firmware em uma visao de relatorio: metricas basicas, AP, gateway, NAT experimental/fallback, firewall/IDS didatico, Traffic Monitor, storage e eventos recentes. A API `/api/report` publica o mesmo resumo em JSON.
 
 O relatorio embarcado e voltado para apresentacao e auditoria visual. O smoke test externo continua sendo a ferramenta de validacao automatizada, pois executa requisicoes HTTP e confere schemas das rotas.
+
+## Tempo relativo dos logs
+
+A base de eventos continua armazenando `uptime_ms` como valor tecnico. O firmware calcula `time_label` no formato `HH:MM:SS.mmm` durante serializacao JSON e renderizacao HTML, evitando aumentar o buffer circular de eventos.
+
+Esse tempo e relativo ao boot e vem de `millis()`. Nao ha NTP nem RTC nesta sprint, portanto a interface nao deve ser apresentada como relogio de calendario.

@@ -280,10 +280,20 @@ def validate_events(results: List[Result], base_url: str, data: Any, label: str 
         add_result(results, label, url, False, "JSON nao e objeto")
         return
     missing = [key for key in ("count", "capacity", "events") if key not in data]
-    events_ok = isinstance(data.get("events"), list)
+    events = data.get("events")
+    events_ok = isinstance(events, list)
     if not events_ok and "events" not in missing:
         missing.append("events(list)")
-    add_result(results, label, url, not missing, "campos ok" if not missing else "faltando: " + ", ".join(missing))
+    if events_ok and events:
+        sample = events[-1] if isinstance(events[-1], dict) else {}
+        if "uptime_ms" not in sample:
+            missing.append("events[].uptime_ms")
+        if "time_label" not in sample:
+            missing.append("events[].time_label")
+    detail = "campos ok" if not missing else "faltando: " + ", ".join(missing)
+    if events_ok and not events and not missing:
+        detail = "campos ok; buffer vazio"
+    add_result(results, label, url, not missing, detail)
 
 
 def validate_persistent(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/events/persistent") -> None:
@@ -298,6 +308,13 @@ def validate_persistent(results: List[Result], base_url: str, data: Any, label: 
         "events ou lines": "events" in data or "lines" in data,
     }
     missing = [name for name, ok in checks.items() if not ok]
+    events = data.get("events")
+    if isinstance(events, list) and events:
+        sample = events[-1] if isinstance(events[-1], dict) else {}
+        if "uptime_ms" not in sample:
+            missing.append("persistent.events[].uptime_ms")
+        if "time_label" not in sample:
+            missing.append("persistent.events[].time_label")
     add_result(results, label, url, not missing, "campos ok" if not missing else "faltando: " + ", ".join(missing))
 
 

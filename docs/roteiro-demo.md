@@ -155,3 +155,9 @@ Fala sugerida: "Este monitor e didatico e observa apenas o HTTP do painel embarc
 Abrir `/report` depois do dashboard e antes dos logs finais. Mostrar que a pagina resume o estado atual do prototipo, incluindo rede, gateway, NAT experimental, firewall/IDS didatico, Traffic Monitor, persistencia e eventos recentes.
 
 Fala sugerida: "Este relatorio embarcado facilita a evidencia de bancada. Ele nao substitui o smoke test externo; ele resume visualmente o estado que o smoke test valida por HTTP."
+
+## Explicar horario dos eventos
+
+Ao abrir `/logs` ou `/report`, destacar que a coluna de tempo mostra `HH:MM:SS.mmm` desde o boot do ESP32. O valor ajuda a correlacionar eventos durante a demonstracao, mas nao e horario real de calendario.
+
+Fala sugerida: "Mantive `uptime_ms` nas APIs para precisao e adicionei `time_label` para leitura humana. NTP ou RTC seriam melhorias futuras."

@@ -208,3 +208,9 @@ Campos resumidos tambem aparecem em `gateway`: `nat_enabled`, `nat_active`, `nat
 - Tipo: JSON
 - Campos principais: `project`, `version`, `uptime_ms`, `system`, `gateway`, `nat`, `firewall`, `ids`, `traffic`, `storage`, `recent_events_summary` e `limitations`.
 - Observacao: nao remove nem substitui `/api/status`; e um resumo consolidado para evidencia.
+
+## Tempo relativo em eventos
+
+Eventos retornados por `/api/events` mantem `uptime_ms` e incluem `time_label` em formato `HH:MM:SS.mmm`. Esse valor representa tempo desde o boot do ESP32, nao data/hora real.
+
+`/api/events/persistent` mantem `lines` para compatibilidade e tambem expoe `events` enriquecido com `time_label` quando a linha possui `uptime_ms`. Linhas antigas podem nao ter `time_label` gravado, mas a API tenta calcular o campo durante a leitura.

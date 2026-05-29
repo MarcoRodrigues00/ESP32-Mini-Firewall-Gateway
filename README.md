@@ -253,3 +253,9 @@ Limitacao: o monitor e didatico e observa apenas requisicoes HTTP recebidas pelo
 A rota `/report` apresenta um relatorio tecnico simples do estado atual do prototipo, com identificacao do projeto, status geral, rede/gateway, firewall/IDS didatico, Traffic Monitor, logs, persistencia, eventos recentes, limitacoes e passos de validacao.
 
 A rota `/api/report` expoe o mesmo resumo em JSON para auditoria e smoke test, sem substituir `/api/status`, `/api/traffic` ou `/evidencias`. O relatorio embarcado facilita a apresentacao local; o smoke test externo continua sendo a validacao repetivel executada pelo notebook.
+
+## Horario relativo nos eventos
+
+As paginas `/logs`, `/eventos`, `/report` e as APIs de eventos exibem `time_label` no formato `HH:MM:SS.mmm`, calculado a partir de `millis()` desde o boot do ESP32. O campo tecnico `uptime_ms` continua disponivel para precisao e compatibilidade.
+
+Esse horario nao e relogio real de calendario. NTP ou RTC podem ser melhorias futuras, mas nao fazem parte desta sprint.
