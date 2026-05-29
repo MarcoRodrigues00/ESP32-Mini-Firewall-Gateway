@@ -1,5 +1,18 @@
 # Resultado de bancada ESP-IDF Appliance v2
 
+Smoke HTTP v2: PASS
+Falhas: 0
+Duração: 0.6s
+Base URL: http://192.168.4.1
+Interface ESP32: wlx503eaae54c47
+IP cliente no AP: 192.168.4.3
+Rota principal preservada: default via 192.168.18.1 dev wlp3s0
+NAT: active=true
+SNTP: synced=true
+Display: enabled=true, available=true
+DNS suspeito validado: malware.test
+
+
 ## Identificacao
 
 - Data/hora:
