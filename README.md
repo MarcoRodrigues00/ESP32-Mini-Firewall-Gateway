@@ -247,3 +247,9 @@ A branch `main` agora apresenta o sistema como mini appliance didatico: Mini IDS
 A API `/api/traffic` expoe os mesmos dados em JSON, e `/api/status` inclui o objeto `traffic` para o dashboard e o smoke tester. A rota `/demo/scan` gera uma simulacao controlada de scan HTTP e registra evento `SECURITY` com origem `IDS`.
 
 Limitacao: o monitor e didatico e observa apenas requisicoes HTTP recebidas pelo servidor web embarcado. Ele nao faz sniffing de pacotes, nao inspeciona HTTPS, nao substitui IDS/IPS profissional e nao transforma o ESP32 em firewall de producao. NAT real validado em ESP-IDF permanece na PoC separada; a `main` continua como painel/appliance principal em PlatformIO + Arduino + `WebServer.h`.
+
+## Relatorio de evidencia embarcado
+
+A rota `/report` apresenta um relatorio tecnico simples do estado atual do prototipo, com identificacao do projeto, status geral, rede/gateway, firewall/IDS didatico, Traffic Monitor, logs, persistencia, eventos recentes, limitacoes e passos de validacao.
+
+A rota `/api/report` expoe o mesmo resumo em JSON para auditoria e smoke test, sem substituir `/api/status`, `/api/traffic` ou `/evidencias`. O relatorio embarcado facilita a apresentacao local; o smoke test externo continua sendo a validacao repetivel executada pelo notebook.

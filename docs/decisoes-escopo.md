@@ -73,3 +73,9 @@ NAT depende de upstream conectado, IP valido e suporte do core/lwIP. Mesmo quand
 A branch `main` passa a ter `/traffic`, `/api/traffic` e `/demo/scan` para reforcar a aparencia de mini appliance portatil de seguranca. A implementacao e propositalmente leve, em RAM, sem dependencia externa e baseada no `WebServer.h` sincronico ja usado pelo projeto.
 
 A decisao de escopo e nao implementar sniffing/promiscuous mode nesta sprint. O objetivo e demonstrar telemetria HTTP do painel, eventos IDS didaticos e logs persistentes, mantendo estabilidade do TDE. NAT real continua separado na PoC ESP-IDF.
+
+## Relatorio de evidencia sem PDF embarcado
+
+A sprint adiciona `/report` e `/api/report` para consolidar evidencias diretamente no ESP32. A decisao e manter HTML/JSON simples, sem gerar PDF no microcontrolador e sem dependencia externa.
+
+O relatorio nao muda o escopo de seguranca: o monitoramento HTTP segue didatico, nao ha sniffing, nao ha inspecao HTTPS e a PoC de NAT real permanece separada na branch ESP-IDF experimental.

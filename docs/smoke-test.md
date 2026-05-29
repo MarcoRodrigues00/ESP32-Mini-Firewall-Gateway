@@ -147,3 +147,9 @@ O smoke test valida que `/gateway` menciona NAT experimental e que `/api/status`
 O smoke tester valida a pagina `/traffic`, o JSON `/api/traffic`, a presenca do objeto `traffic` em `/api/status` e a rota `/demo/scan`. Depois da simulacao de scan, o script consulta `/api/events` para confirmar evento `SECURITY`/`IDS` e consulta `/api/traffic` novamente para validar o schema atualizado.
 
 O teste continua usando apenas Python standard library e nao executa ataque real. A rota `/demo/scan` e uma simulacao controlada sobre o HTTP do painel.
+
+## Validacao do relatorio embarcado
+
+O smoke tester valida `/report` como HTML e `/api/report` como JSON. O schema esperado contem `project`, `version`, `system`, `gateway`, `nat`, `firewall`, `ids`, `traffic`, `storage`, `recent_events_summary` e `limitations`.
+
+`/report` e uma evidencia visual embarcada. O smoke test externo continua sendo o registro automatizado, com relatorio Markdown em `evidencias/`.

@@ -194,3 +194,17 @@ Campos resumidos tambem aparecem em `gateway`: `nat_enabled`, `nat_active`, `nat
 - Metodo: `GET`
 - Finalidade: simular acessos a rotas sensiveis e inexistentes, incrementar contadores do Traffic Monitor e gerar evento `SECURITY` com origem `IDS`.
 - Observacao: simulacao controlada para demonstracao, sem ataque real.
+
+## `/report`
+
+- Metodo: `GET`
+- Tipo: HTML
+- Finalidade: relatorio tecnico embarcado de evidencia, com resumo de projeto, firmware, rede, gateway, NAT experimental, firewall/IDS didatico, Traffic Monitor, logs, eventos recentes, limitacoes e validacao.
+- Observacao: nao e dashboard operacional nem PDF; e uma pagina simples para apresentacao e auditoria em bancada.
+
+## `/api/report`
+
+- Metodo: `GET`
+- Tipo: JSON
+- Campos principais: `project`, `version`, `uptime_ms`, `system`, `gateway`, `nat`, `firewall`, `ids`, `traffic`, `storage`, `recent_events_summary` e `limitations`.
+- Observacao: nao remove nem substitui `/api/status`; e um resumo consolidado para evidencia.

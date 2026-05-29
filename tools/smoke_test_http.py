@@ -251,6 +251,29 @@ def validate_traffic(results: List[Result], base_url: str, data: Any, label: str
     missing = [name for name, ok in checks.items() if not ok]
     add_result(results, label, url, not missing, "campos ok" if not missing else "faltando: " + ", ".join(missing))
 
+
+def validate_report(results: List[Result], base_url: str, data: Any) -> None:
+    url = make_url(base_url, "/api/report")
+    if not isinstance(data, dict):
+        add_result(results, "Schema /api/report", url, False, "JSON nao e objeto")
+        return
+    checks = {
+        "project": bool(data.get("project")),
+        "version": bool(data.get("version")),
+        "uptime_ms": "uptime_ms" in data,
+        "system": isinstance(data.get("system"), dict),
+        "gateway": isinstance(data.get("gateway"), dict),
+        "nat": isinstance(data.get("nat"), dict),
+        "firewall": isinstance(data.get("firewall"), dict),
+        "ids": isinstance(data.get("ids"), dict),
+        "traffic": isinstance(data.get("traffic"), dict),
+        "storage": isinstance(data.get("storage"), dict),
+        "recent_events_summary": isinstance(data.get("recent_events_summary"), dict),
+        "limitations": isinstance(data.get("limitations"), list),
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    add_result(results, "Schema /api/report", url, not missing, "campos ok" if not missing else "faltando: " + ", ".join(missing))
+
 def validate_events(results: List[Result], base_url: str, data: Any, label: str = "Schema /api/events") -> None:
     url = make_url(base_url, "/api/events")
     if not isinstance(data, dict):
@@ -422,6 +445,7 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
         ("/logs", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/eventos", ("Registro", "eventos", "LittleFS", "Persistencia")),
         ("/traffic", ("Traffic Monitor", "requests", "IDS", "HTTPS")),
+        ("/report", ("Relatorio de evidencia", "prototipo", "Traffic Monitor", "Como validar")),
         ("/gateway", ("Gateway", "AP", "STA", "NAT experimental")),
         ("/wifi", ("Wi-Fi upstream", "SSID", "Passphrase", "recuperacao")),
         ("/demo", ("Demo guiada", "roteiro", "TDE")),
@@ -439,6 +463,10 @@ def run(base_url: str, output_dir: Path) -> Tuple[bool, Path, List[Result]]:
     traffic_before = check_json_route(results, base_url, "/api/traffic")
     if traffic_before is not None:
         validate_traffic(results, base_url, traffic_before)
+
+    report = check_json_route(results, base_url, "/api/report")
+    if report is not None:
+        validate_report(results, base_url, report)
 
     events_before = check_json_route(results, base_url, "/api/events")
     if events_before is not None:

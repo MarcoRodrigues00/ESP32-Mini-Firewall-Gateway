@@ -124,3 +124,9 @@ O Traffic Monitor v0.1 mantem um snapshot em RAM dos acessos HTTP ao painel. Ele
 A deteccao didatica de scan usa uma janela curta de 404 sucessivos e cooldown para evitar excesso de eventos. Quando a condicao e atingida, o firmware registra evento `SECURITY` com origem `IDS` e incrementa `suspicious_scan_count`.
 
 Esse monitor nao atua em modo promiscuo, nao faz sniffing de pacotes, nao inspeciona HTTPS e nao substitui IDS/IPS profissional. A PoC de NAT real em ESP-IDF fica separada da branch `main`; a `main` permanece como appliance/painel principal em Arduino `WebServer.h`.
+
+## Relatorio de evidencia embarcado
+
+A pagina `/report` consolida snapshots ja mantidos pelo firmware em uma visao de relatorio: metricas basicas, AP, gateway, NAT experimental/fallback, firewall/IDS didatico, Traffic Monitor, storage e eventos recentes. A API `/api/report` publica o mesmo resumo em JSON.
+
+O relatorio embarcado e voltado para apresentacao e auditoria visual. O smoke test externo continua sendo a ferramenta de validacao automatizada, pois executa requisicoes HTTP e confere schemas das rotas.

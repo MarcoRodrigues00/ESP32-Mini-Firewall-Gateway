@@ -149,3 +149,9 @@ Teste manual, se houver suporte: conectar outro cliente ao AP `ESP32-Firewall-La
 4. Voltar para `/traffic` e `/logs` para mostrar o evento `SECURITY` com origem `IDS`.
 
 Fala sugerida: "Este monitor e didatico e observa apenas o HTTP do painel embarcado. Ele ajuda a explicar conceitos de IDS e scan sem prometer sniffing de pacotes, inspecao HTTPS ou substituicao de IDS profissional."
+
+## Mostrar relatorio embarcado
+
+Abrir `/report` depois do dashboard e antes dos logs finais. Mostrar que a pagina resume o estado atual do prototipo, incluindo rede, gateway, NAT experimental, firewall/IDS didatico, Traffic Monitor, persistencia e eventos recentes.
+
+Fala sugerida: "Este relatorio embarcado facilita a evidencia de bancada. Ele nao substitui o smoke test externo; ele resume visualmente o estado que o smoke test valida por HTTP."

@@ -257,6 +257,8 @@ void addEvent(const char *level, const char *source, const char *message, const 
 void refreshGatewaySnapshot(bool logChanges);
 void evaluateNatState(bool logChanges);
 void attemptUpstreamConnection(const char *reason);
+void appendGatewayJson(String &json);
+void appendNatJson(String &json);
 
 void appendJsonEscaped(String &json, const char *text)
 {
@@ -1432,6 +1434,193 @@ void appendHeader(String &html, const char *title, const char *subtitle)
     html += F("</p></div><span class=\"badge ok\">ativo</span></div></div></header>");
 }
 
+void appendRecentEventsSummaryJson(String &json)
+{
+    json += "{\"count\":";
+    if (eventsMutex == nullptr || xSemaphoreTake(eventsMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        json += "0,\"capacity\":";
+        json += EVENT_CAPACITY;
+        json += ",\"recent\":[]}";
+        return;
+    }
+
+    json += eventCount;
+    json += ",\"capacity\":";
+    json += EVENT_CAPACITY;
+    json += ",\"recent\":[";
+    const size_t rows = eventCount < 5 ? eventCount : 5;
+    for (size_t offset = 0; offset < rows; ++offset) {
+        if (offset > 0) {
+            json += ",";
+        }
+        const size_t newestOffset = eventCount - 1 - offset;
+        const size_t index = (eventStart + newestOffset) % EVENT_CAPACITY;
+        appendEventJsonObject(json, events[index]);
+    }
+    json += "]}";
+    xSemaphoreGive(eventsMutex);
+}
+
+String buildReportJson()
+{
+    const MetricsSnapshot metrics = readMetricsSnapshot();
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    const NatSnapshot nat = readNatSnapshot();
+    const TrafficSnapshot traffic = readTrafficSnapshot();
+    String json;
+    json.reserve(2400);
+    json += "{\"project\":\"";
+    appendJsonEscaped(json, PROJECT_NAME);
+    json += "\",\"version\":\"";
+    appendJsonEscaped(json, PROJECT_VERSION);
+    json += "\",\"uptime_ms\":";
+    json += millis();
+    json += ",\"system\":{\"free_heap\":";
+    json += metrics.freeHeap;
+    json += ",\"min_free_heap\":";
+    json += metrics.minFreeHeap;
+    json += ",\"flash_size\":";
+    json += metrics.flashSize;
+    json += ",\"sketch_size\":";
+    json += metrics.sketchSize;
+    json += ",\"ap_ssid\":\"";
+    appendJsonEscaped(json, metrics.apSsid);
+    json += "\",\"ap_ip\":\"";
+    appendJsonEscaped(json, metrics.apIp);
+    json += "\"}";
+    json += ",\"gateway\":";
+    appendGatewayJson(json);
+    json += ",\"nat\":";
+    appendNatJson(json);
+    json += ",\"firewall\":{\"enabled\":";
+    json += firewall.enabled ? "true" : "false";
+    json += ",\"total_requests\":";
+    json += firewall.totalRequests;
+    json += ",\"security_events\":";
+    json += firewall.securityEvents;
+    json += ",\"last_client_ip\":\"";
+    appendJsonEscaped(json, firewall.lastClientIp);
+    json += "\",\"last_route\":\"";
+    appendJsonEscaped(json, firewall.lastRoute);
+    json += "\"}";
+    json += ",\"ids\":{\"enabled\":";
+    json += firewall.idsEnabled ? "true" : "false";
+    json += ",\"events\":";
+    json += firewall.idsEvents;
+    json += ",\"suspicious_404_count\":";
+    json += firewall.suspicious404Count;
+    json += ",\"sensitive_path_hits\":";
+    json += firewall.sensitivePathHits;
+    json += "}";
+    json += ",\"traffic\":";
+    appendTrafficJsonObject(json, traffic);
+    json += ",\"storage\":";
+    appendStorageJson(json);
+    json += ",\"recent_events_summary\":";
+    appendRecentEventsSummaryJson(json);
+    json += ",\"limitations\":[";
+    json += "\"Monitoramento HTTP didatico limitado ao painel embarcado\",";
+    json += "\"Nao faz sniffing de pacotes nem inspecao HTTPS\",";
+    json += "\"Nao substitui firewall ou IDS profissional\",";
+    json += "\"PoC de NAT real fica em branch experimental ESP-IDF separada\"";
+    json += "]}";
+    return json;
+}
+
+String reportPage()
+{
+    const MetricsSnapshot metrics = readMetricsSnapshot();
+    const FirewallSnapshot firewall = readFirewallSnapshot();
+    const GatewaySnapshot gateway = readGatewaySnapshot();
+    const NatSnapshot nat = readNatSnapshot();
+    const TrafficSnapshot traffic = readTrafficSnapshot();
+    const size_t events = readEventCount();
+    const size_t logSize = persistentLogSize();
+    const char *topRoute = traffic.topRoutes[0].route[0] != '\0' ? traffic.topRoutes[0].route : "n/d";
+
+    String html;
+    html.reserve(9800);
+    appendPageHead(html, "Relatorio de evidencia - ESP32 Mini Firewall Gateway");
+    appendHeader(html, "Relatorio de evidencia", "Este relatorio resume o estado atual do prototipo.");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/traffic\">Traffic</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/report\">/api/report</a></div>");
+    html += F("<div class=\"panel\"><h2>Identificacao do projeto</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Projeto</strong><span>");
+    appendHtmlEscaped(html, PROJECT_NAME);
+    html += F("</span></div><div class=\"metric\"><strong>Firmware</strong><span>");
+    appendHtmlEscaped(html, PROJECT_VERSION);
+    html += F("</span></div><div class=\"metric\"><strong>Fase</strong><span>");
+    appendHtmlEscaped(html, PROJECT_PHASE);
+    html += F("</span></div></div><p class=\"note\">Relatorio tecnico embarcado para apresentacao, auditoria simples e documentacao final.</p></div>");
+
+    html += F("<div class=\"panel\"><h2>Status geral</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Uptime</strong><span>");
+    html += metrics.uptimeSeconds;
+    html += F("s</span></div><div class=\"metric\"><strong>Heap livre</strong><span>");
+    html += metrics.freeHeap;
+    html += F(" bytes</span></div><div class=\"metric\"><strong>Eventos RAM</strong><span>");
+    html += events;
+    html += F("/");
+    html += EVENT_CAPACITY;
+    html += F("</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span>");
+    html += firewall.securityEvents;
+    html += F("</span></div></div></div>");
+
+    html += F("<div class=\"panel\"><h2>Rede e gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>AP SSID</strong><span>");
+    appendHtmlEscaped(html, gateway.apSsid);
+    html += F("</span></div><div class=\"metric\"><strong>AP IP</strong><span>");
+    appendHtmlEscaped(html, gateway.apIp);
+    html += F("</span></div><div class=\"metric\"><strong>Clientes conectados</strong><span>");
+    html += gateway.clientCount;
+    html += F("</span></div><div class=\"metric\"><strong>Upstream</strong><span>");
+    html += gateway.staConfigured ? (gateway.staConnected ? "conectado" : "configurado/desconectado") : "nao configurado";
+    html += F("</span></div><div class=\"metric\"><strong>IP upstream</strong><span>");
+    appendHtmlEscaped(html, gateway.staConnected ? gateway.upstreamIp : "n/d");
+    html += F("</span></div><div class=\"metric\"><strong>NAT status</strong><span>");
+    appendHtmlEscaped(html, nat.lastStatus);
+    html += F("</span></div></div><p class=\"note\">A PoC de NAT real fica em branch experimental ESP-IDF. Na main, NAT e experimental com fallback e telemetria clara.</p></div>");
+
+    html += F("<div class=\"panel\"><h2>Firewall/IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Requests firewall</strong><span>");
+    html += firewall.totalRequests;
+    html += F("</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += firewall.idsEvents;
+    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += firewall.suspicious404Count;
+    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += firewall.sensitivePathHits;
+    html += F("</span></div></div><p class=\"note\">Este prototipo nao substitui firewall/IDS profissional.</p></div>");
+
+    html += F("<div class=\"panel\"><h2>Traffic Monitor</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total HTTP</strong><span>");
+    html += traffic.totalRequests;
+    html += F("</span></div><div class=\"metric\"><strong>404 count</strong><span>");
+    html += traffic.notFoundCount;
+    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += traffic.sensitivePathHits;
+    html += F("</span></div><div class=\"metric\"><strong>Scans suspeitos</strong><span>");
+    html += traffic.suspiciousScanCount;
+    html += F("</span></div><div class=\"metric\"><strong>Ultima rota</strong><span>");
+    appendHtmlEscaped(html, traffic.lastRoute);
+    html += F("</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span>");
+    appendHtmlEscaped(html, traffic.lastIp);
+    html += F("</span></div><div class=\"metric\"><strong>Top rota</strong><span>");
+    appendHtmlEscaped(html, topRoute);
+    html += F("</span></div></div><p class=\"note\">O monitoramento HTTP e didatico e limitado ao painel embarcado.</p></div>");
+
+    html += F("<div class=\"panel\"><h2>Logs e persistencia</h2><div class=\"grid summary\"><div class=\"metric\"><strong>LittleFS</strong><span>");
+    html += littleFsAvailable ? "ativo" : "indisponivel";
+    html += F("</span></div><div class=\"metric\"><strong>Arquivo persistente</strong><span>");
+    html += logSize;
+    html += F(" bytes</span></div><div class=\"metric\"><strong>Limite</strong><span>");
+    html += PERSISTENT_EVENTS_MAX_SIZE;
+    html += F(" bytes</span></div></div><p class=\"note\">Persistencia seletiva para WARN, ERROR, SECURITY e eventos importantes.</p></div>");
+
+    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><div class=\"table-wrap\">");
+    appendEventsTableHtml(html, 8);
+    html += F("</div></div>");
+    html += F("<div class=\"panel\"><h2>Limitacoes tecnicas</h2><ul><li>Monitoramento HTTP didatico limitado ao painel embarcado.</li><li>Nao faz sniffing de pacotes nem inspecao HTTPS.</li><li>Este prototipo nao substitui firewall/IDS profissional.</li><li>A PoC de NAT real fica em branch experimental ESP-IDF separada.</li></ul></div>");
+    html += F("<div class=\"panel\"><h2>Como validar</h2><ul><li>Abrir <code>/api/report</code> e conferir o resumo JSON.</li><li>Executar <code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code> quando conectado ao AP.</li><li>Gerar <code>/demo/scan</code> e verificar eventos SECURITY/IDS em <code>/logs</code>.</li><li>Comparar <code>/report</code>, <code>/api/status</code> e <code>/api/traffic</code>.</li></ul></div>");
+    html += F("</main></body></html>");
+    return html;
+}
+
 String evidencePage()
 {
     const MetricsSnapshot snapshot = readMetricsSnapshot();
@@ -1440,7 +1629,7 @@ String evidencePage()
     html.reserve(7600);
     appendPageHead(html, "Evidencia de execucao - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Evidencia de execucao", "Resumo tecnico para print do firmware em execucao no ESP32.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Versao</strong><span>");
     html += PROJECT_VERSION;
     html += F("</span></div><div class=\"metric\"><strong>IP AP</strong><span>");
@@ -1519,7 +1708,7 @@ String logsPage()
     html.reserve(8200);
     appendPageHead(html, "Registro de eventos - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Registro de eventos", "Eventos em memoria para diagnostico do firmware e demonstracao em bancada.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/api/events\">JSON</a><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a><a class=\"btn security\" href=\"/demo/flood\">Gerar flood</a><a class=\"btn security\" href=\"/demo/ids\">Gerar IDS</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/events\">JSON</a><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a><a class=\"btn security\" href=\"/demo/flood\">Gerar flood</a><a class=\"btn security\" href=\"/demo/ids\">Gerar IDS</a></div>");
     html += F("<div class=\"panel tight\"><div class=\"grid summary\"><div class=\"metric\"><strong>Eventos em memoria</strong><span>");
     html += count;
     html += F("/");
@@ -1538,7 +1727,7 @@ String trafficPage()
     html.reserve(6200);
     appendPageHead(html, "Traffic Monitor - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Traffic Monitor HTTP", "Monitoramento didatico do trafego HTTP recebido pelo painel embarcado.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/api/traffic\">/api/traffic</a><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/traffic\">/api/traffic</a><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo de trafego</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total requests</strong><span>");
     html += traffic.totalRequests;
     html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
@@ -1595,7 +1784,7 @@ String htmlPage()
     html.reserve(9200);
     appendPageHead(html, "ESP32 Mini Firewall Gateway");
     appendHeader(html, PROJECT_NAME, "Mini IDS portatil, Mini Firewall Gateway e monitor ciberfisico em ESP32 para laboratorio didatico de seguranca.");
-    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/wifi\">Wi-Fi</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
+    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/wifi\">Wi-Fi</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/report\">Relatorio</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
     html += F("<div class=\"panel tight\"><h2>Traffic Monitor HTTP</h2><p class=\"note\"><a href=\"/traffic\">Abrir /traffic</a> para ver total de requests, top rotas, 404 suspeitos, rotas sensiveis e eventos IDS. Monitoramento didatico do HTTP do painel, sem sniffing de HTTPS.</p></div>");
     html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span id=\"idsEvents\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
@@ -1621,7 +1810,7 @@ String demoPage()
     html.reserve(7600);
     appendPageHead(html, "Demo guiada - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Demo guiada", "Roteiro de apresentacao do TDE no ESP32 em bancada.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a><a class=\"btn\" href=\"/api/events/persistent\">/api/events/persistent</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a><a class=\"btn\" href=\"/api/events/persistent\">/api/events/persistent</a></div>");
     html += F("<div class=\"panel\"><h2>Status resumido</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Firmware</strong><span>");
     html += PROJECT_VERSION;
     html += F("</span></div><div class=\"metric\"><strong>IP AP</strong><span>");
@@ -1653,7 +1842,7 @@ String demoPage()
     html += F("</tbody></table></div></div>");
     html += F("<div class=\"cols\"><div class=\"panel\"><h2>Como apresentar</h2><ul><li>Primeiro mostro o painel local do ESP32.</li><li>Depois mostro o gateway didatico e o AP.</li><li>Em seguida simulo eventos de seguranca.</li><li>Os eventos aparecem em RAM e nos logs persistentes.</li><li>Por fim, executo o smoke test para validar as rotas.</li></ul></div>");
     html += F("<div class=\"panel\"><h2>Limitacoes</h2><ul><li>NAT/roteamento real nao implementado nesta fase.</li><li>IDS e didatico e baseado em HTTP do painel.</li><li>Nao inspeciona HTTPS.</li><li>Sensores fisicos ficam para fase final.</li><li>INA219 esta preparado no firmware, mas teste fisico depende de montagem/solda.</li></ul></div></div>");
-    html += F("<div class=\"panel tight\"><h2>APIs para demonstracao</h2><p class=\"note\"><a href=\"/api/status\">/api/status</a> mostra metricas, gateway e IDS. <a href=\"/api/events\">/api/events</a> mostra o buffer em RAM. <a href=\"/api/events/persistent\">/api/events/persistent</a> mostra eventos relevantes salvos em LittleFS.</p></div>");
+    html += F("<div class=\"panel tight\"><h2>APIs para demonstracao</h2><p class=\"note\"><a href=\"/api/status\">/api/status</a> mostra metricas, gateway e IDS. <a href=\"/api/events\">/api/events</a> mostra o buffer em RAM. <a href=\"/api/events/persistent\">/api/events/persistent</a> mostra eventos relevantes salvos em LittleFS. <a href=\"/report\">/report</a> consolida a evidencia embarcada.</p></div>");
     html += F("</main></body></html>");
     return html;
 }
@@ -2093,6 +2282,12 @@ void handleTrafficApi()
     server.send(200, "application/json", buildTrafficJson());
 }
 
+void handleReportApi()
+{
+    registerHttpAccess("/api/report");
+    server.send(200, "application/json", buildReportJson());
+}
+
 void handleEvidences()
 {
     const uint32_t startMicros = micros();
@@ -2111,6 +2306,12 @@ void handleTraffic()
 {
     registerHttpAccess("/traffic");
     server.send(200, "text/html; charset=utf-8", trafficPage());
+}
+
+void handleReport()
+{
+    registerHttpAccess("/report");
+    server.send(200, "text/html; charset=utf-8", reportPage());
 }
 
 void redirectToLogs()
@@ -2348,10 +2549,12 @@ void setupWebServer()
     server.on("/api/status", HTTP_GET, handleStatus);
     server.on("/api/events", HTTP_GET, handleEventsApi);
     server.on("/api/traffic", HTTP_GET, handleTrafficApi);
+    server.on("/api/report", HTTP_GET, handleReportApi);
     server.on("/api/events/persistent", HTTP_GET, handlePersistentEventsApi);
     server.on("/evidencias", HTTP_GET, handleEvidences);
     server.on("/gateway", HTTP_GET, handleGateway);
     server.on("/traffic", HTTP_GET, handleTraffic);
+    server.on("/report", HTTP_GET, handleReport);
     server.on("/wifi", HTTP_GET, handleWifiPage);
     server.on("/wifi/save", HTTP_POST, handleWifiSave);
     server.on("/wifi/clear", HTTP_GET, handleWifiClear);
