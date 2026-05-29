@@ -9,8 +9,9 @@ PoC isolada para unir NAT/NAPT real em ESP-IDF com um dashboard HTTP demonstráv
 - NAPT real via `CONFIG_LWIP_IP_FORWARD` e `CONFIG_LWIP_NAPT`.
 - NAPT habilitado apenas após `IP_EVENT_STA_GOT_IP`.
 - Servidor web com `esp_http_server`.
-- Eventos HTTP, Wi-Fi, NAT e segurança didática mantidos em RAM.
-- Contadores de tráfego HTTP, 404, rotas sensíveis, demo scan e top routes simples.
+- Eventos filtrados de boot, Wi-Fi, NAT e segurança didática mantidos em RAM.
+- Requests normais de dashboard/API não viram evento de log para evitar ruído de polling.
+- Contadores de tráfego HTTP, 404, rotas sensíveis, demo scan, total requests e top routes simples.
 - Dashboard local sem CDN.
 
 ## Configuração local
@@ -56,12 +57,18 @@ Rotas sensíveis registradas para demonstração didática:
 - `/config`
 - `/debug`
 
-Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura simples incrementam também `suspicious_scan_count`.
+Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura simples incrementam também `suspicious_scan_count`. Requests normais como `/`, `/api/status`, `/api/events`, `/logs`, `/traffic` e `/report` continuam contabilizados em `/traffic`, mas não geram evento INFO a cada polling.
+
+## Pendências de bancada
+
+- O build/upload observado na bancada mostrou aviso `Expected 4MB, found 2MB`. A flash real do módulo precisa ser confirmada no próximo teste físico.
+- Não alterar `board_build.flash_size` nem partições no escuro; se a bancada confirmar 2MB, ajustar `platformio.ini` em sprint própria.
 
 ## Limitações
 
-- Não há firewall profissional, IDS/IPS completo, WAF, SIEM nem inspeção HTTPS.
+- Não há firewall profissional, IDS/IPS completo, WAF, SIEM, sniffing nem inspeção HTTPS.
 - Eventos ficam somente em RAM e são perdidos ao reiniciar.
+- Logs são filtrados; use `/traffic` para observar requests normais e top routes.
 - Os contadores de rotas são simples e não persistentes.
 - NAT depende de upstream STA com IP válido.
 - Sem persistência, sensores, atuadores e FreeRTOS completo nesta PoC.

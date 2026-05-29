@@ -129,6 +129,26 @@ static void format_uptime_label(uint64_t ms, char *out, size_t out_len)
              (unsigned long long)secs);
 }
 
+static void json_escape_string(const char *in, char *out, size_t out_len)
+{
+    size_t pos = 0;
+    if (out_len == 0) {
+        return;
+    }
+    for (size_t i = 0; in[i] != '\0' && pos + 1 < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if ((c == '"' || c == '\\') && pos + 2 < out_len) {
+            out[pos++] = '\\';
+            out[pos++] = (char)c;
+        } else if (c < 0x20) {
+            out[pos++] = ' ';
+        } else {
+            out[pos++] = (char)c;
+        }
+    }
+    out[pos] = '\0';
+}
+
 static void add_event(const char *level, const char *source, const char *fmt, ...)
 {
     char message[EVENT_MESSAGE_LEN];
@@ -455,7 +475,6 @@ static void start_wifi_ap_sta(void)
 static esp_err_t send_text(httpd_req_t *req, const char *route, const char *text)
 {
     increment_route_counter(route);
-    log_http_event(req, route, "INFO", "text_response");
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
     return httpd_resp_sendstr(req, text);
 }
@@ -463,7 +482,6 @@ static esp_err_t send_text(httpd_req_t *req, const char *route, const char *text
 static esp_err_t send_html(httpd_req_t *req, const char *route, const char *html)
 {
     increment_route_counter(route);
-    log_http_event(req, route, "INFO", "html_response");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_sendstr(req, html);
 }
@@ -471,7 +489,6 @@ static esp_err_t send_html(httpd_req_t *req, const char *route, const char *html
 static esp_err_t root_handler(httpd_req_t *req)
 {
     increment_route_counter("/");
-    log_http_event(req, "/", "INFO", "dashboard");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr_chunk(req,
         "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\">"
@@ -486,15 +503,19 @@ static esp_err_t root_handler(httpd_req_t *req)
         "<section class=\"card\"><h2>Rotas mais acessadas</h2><table><thead><tr><th>Rota</th><th>Hits</th></tr></thead><tbody id=\"routes\"></tbody></table></section>"
         "<section class=\"card\"><h2>Eventos recentes</h2><table><thead><tr><th>ID</th><th>Tempo</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></section></main>"
         "<script>"
+        "function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
+        "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
+        "function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }"
+        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
         "async function load(){const s=await fetch('/api/status').then(r=>r.json());"
         "document.getElementById('cards').innerHTML=["
         "['AP',s.ap.ssid+' / '+s.ap.ip],['Upstream',s.upstream.connected?s.upstream.ip:(s.upstream.configured?'conectando':'n/d')],"
         "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Clientes',s.clients.count],"
         "['Requests',s.traffic.total],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
-        "].map(c=>'<div class=\"card\"><div class=\"label\">'+c[0]+'</div><div class=\"value\">'+c[1]+'</div></div>').join('');"
-        "document.getElementById('routes').innerHTML=s.traffic.top_routes.map(x=>'<tr><td><code>'+x.route+'</code></td><td>'+x.count+'</td></tr>').join('');"
+        "].map(c=>card(c[0],c[1])).join('');"
+        "document.getElementById('routes').innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');"
         "const e=await fetch('/api/events').then(r=>r.json());"
-        "document.getElementById('events').innerHTML=e.events.map(x=>'<tr><td>'+x.id+'</td><td>'+x.time_label+'</td><td>'+x.level+'</td><td>'+x.source+'</td><td>'+x.message+'</td></tr>').join('');}"
+        "document.getElementById('events').innerHTML=(e.events||[]).map(eventRow).join('');}"
         "load();setInterval(load,5000);</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -511,7 +532,6 @@ static esp_err_t status_handler(httpd_req_t *req)
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
     increment_route_counter("/api/status");
-    log_http_event(req, "/api/status", "INFO", "json_status");
     char *json = calloc(1, 8192);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -538,6 +558,15 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     strlcpy(netmask_snapshot, upstream_netmask, sizeof(netmask_snapshot));
     xSemaphoreGive(state_mutex);
 
+    char project_json[64];
+    char version_json[24];
+    char ap_ssid_json[40];
+    char last_route_json[LAST_ROUTE_LEN * 2];
+    json_escape_string(APPLIANCE_V2_PROJECT, project_json, sizeof(project_json));
+    json_escape_string(APPLIANCE_V2_VERSION, version_json, sizeof(version_json));
+    json_escape_string(APPLIANCE_V2_AP_SSID, ap_ssid_json, sizeof(ap_ssid_json));
+    json_escape_string(traffic_snapshot.last_route, last_route_json, sizeof(last_route_json));
+
     size_t used = snprintf(json, 8192,
         "{"
         "\"project\":\"%s\","
@@ -550,12 +579,12 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         "\"nat\":{\"compiled\":%s,\"attempted\":%s,\"active\":%s},"
         "\"clients\":{\"count\":%u},"
         "\"traffic\":{\"total\":%llu,\"root\":%llu,\"status\":%llu,\"api\":%llu,\"api_status\":%llu,\"logs\":%llu,\"api_events\":%llu,\"traffic\":%llu,\"report\":%llu,\"demo\":%llu,\"demo_scan\":%llu,\"demo_security\":%llu,\"demo_info\":%llu,\"favicon\":%llu,\"not_found\":%llu,\"sensitive_path_hits\":%llu,\"suspicious_scan_count\":%llu,\"demo_scan_count\":%llu,\"last_route\":\"%s\",\"top_routes\":[",
-        APPLIANCE_V2_PROJECT,
-        APPLIANCE_V2_VERSION,
+        project_json,
+        version_json,
         (unsigned long long)uptime_ms(),
         (unsigned long)esp_get_free_heap_size(),
         (unsigned long)esp_get_minimum_free_heap_size(),
-        APPLIANCE_V2_AP_SSID,
+        ap_ssid_json,
         AP_IP_A, AP_IP_B, AP_IP_C, AP_IP_D,
         APPLIANCE_V2_AP_CHANNEL,
         APPLIANCE_V2_AP_MAX_CLIENTS,
@@ -592,17 +621,19 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         (unsigned long long)traffic_snapshot.sensitive_path_hits,
         (unsigned long long)traffic_snapshot.suspicious_scan_count,
         (unsigned long long)traffic_snapshot.demo_scan_count,
-        traffic_snapshot.last_route);
+        last_route_json);
 
     bool first = true;
     for (uint32_t i = 0; i < ROUTE_TRACK_CAPACITY && used < 7900; i++) {
         if (route_snapshot[i].count == 0) {
             continue;
         }
+        char route_json[LAST_ROUTE_LEN * 2];
+        json_escape_string(route_snapshot[i].route, route_json, sizeof(route_json));
         used += snprintf(json + used, 8192 - used,
             "%s{\"route\":\"%s\",\"count\":%llu}",
             first ? "" : ",",
-            route_snapshot[i].route,
+            route_json,
             (unsigned long long)route_snapshot[i].count);
         first = false;
     }
@@ -623,7 +654,6 @@ static esp_err_t api_status_handler(httpd_req_t *req)
 static esp_err_t api_events_handler(httpd_req_t *req)
 {
     increment_route_counter("/api/events");
-    log_http_event(req, "/api/events", "INFO", "json_events");
     char *json = calloc(1, 6144);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
@@ -660,22 +690,23 @@ static esp_err_t api_events_handler(httpd_req_t *req)
 static esp_err_t logs_handler(httpd_req_t *req)
 {
     increment_route_counter("/logs");
-    log_http_event(req, "/logs", "INFO", "logs_table");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr_chunk(req, "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Logs</title><style>");
     httpd_resp_sendstr_chunk(req, html_style);
     httpd_resp_sendstr_chunk(req,
         "</style></head><body><header><h1>Logs</h1><div>Eventos recentes mantidos em RAM.</div>"
         "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/report\">Report</a><a href=\"/api/events\">JSON</a></nav></header>"
-        "<main><table><thead><tr><th>ID</th><th>Uptime</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></main>"
-        "<script>fetch('/api/events').then(r=>r.json()).then(j=>events.innerHTML=j.events.map(x=>'<tr><td>'+x.id+'</td><td>'+x.time_label+'</td><td>'+x.level+'</td><td>'+x.source+'</td><td>'+x.message+'</td></tr>').join(''));</script></body></html>");
+        "<main><section class=\"card\"><p>Eventos são filtrados para evitar ruído de polling; requests normais aparecem em /traffic.</p></section>"
+        "<table><thead><tr><th>ID</th><th>Uptime</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></main>"
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
+        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
+        "fetch('/api/events').then(r=>r.json()).then(j=>events.innerHTML=(j.events||[]).map(eventRow).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
 static esp_err_t traffic_handler(httpd_req_t *req)
 {
     increment_route_counter("/traffic");
-    log_http_event(req, "/traffic", "INFO", "traffic_page");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr_chunk(req, "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Traffic</title><style>");
     httpd_resp_sendstr_chunk(req, html_style);
@@ -683,14 +714,13 @@ static esp_err_t traffic_handler(httpd_req_t *req)
         "</style></head><body><header><h1>Traffic</h1><div>Contadores HTTP e sinais simples de varredura.</div>"
         "<nav><a href=\"/\">Dashboard</a><a href=\"/logs\">Logs</a><a href=\"/demo/scan\">Demo scan</a><a href=\"/api/status\">JSON</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Top routes</h2><table><thead><tr><th>Rota</th><th>Hits</th></tr></thead><tbody id=\"routes\"></tbody></table></section></main>"
-        "<script>async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total',s.traffic.total],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>'<div class=\"card\"><div class=\"label\">'+c[0]+'</div><div class=\"value\">'+c[1]+'</div></div>').join('');routes.innerHTML=s.traffic.top_routes.map(x=>'<tr><td><code>'+x.route+'</code></td><td>'+x.count+'</td></tr>').join('');}load();setInterval(load,5000);</script></body></html>");
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total requests',s.traffic.total],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>card(c[0],c[1])).join('');routes.innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');}load();setInterval(load,5000);</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
 static esp_err_t report_handler(httpd_req_t *req)
 {
     increment_route_counter("/report");
-    log_http_event(req, "/report", "INFO", "report_page");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_sendstr_chunk(req, "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Report</title><style>");
     httpd_resp_sendstr_chunk(req, html_style);
@@ -698,7 +728,7 @@ static esp_err_t report_handler(httpd_req_t *req)
         "</style></head><body><header><h1>Relatório da PoC</h1><div>Resumo operacional para demonstração em bancada.</div>"
         "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/api/status\">JSON</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Escopo validado</h2><table><tr><td>AP+STA</td><td>AP fixo em 192.168.4.1 e STA opcional.</td></tr><tr><td>NAPT</td><td>Habilitado somente após IP válido no STA.</td></tr><tr><td>IDS didático</td><td>Contadores para rotas sensíveis e padrões simples de scan HTTP.</td></tr><tr><td>Limitação</td><td>Não é firewall profissional e não inspeciona HTTPS.</td></tr></table></section></main>"
-        "<script>fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Heap livre',s.heap_free],['Requests',s.traffic.total]].map(c=>'<div class=\"card\"><div class=\"label\">'+c[0]+'</div><div class=\"value\">'+c[1]+'</div></div>').join(''));</script></body></html>");
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Heap livre',s.heap_free],['Requests',s.traffic.total]].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -743,7 +773,10 @@ static esp_err_t demo_security_handler(httpd_req_t *req)
 
 static esp_err_t demo_info_handler(httpd_req_t *req)
 {
-    return send_html(req, "/demo/info", "<!doctype html><html><head><meta charset=\"utf-8\"><title>Demo info</title></head><body><h1>Demo info</h1><p>Use /api/status para ver os contadores expandidos.</p></body></html>");
+    increment_route_counter("/demo/info");
+    log_http_event(req, "/demo/info", "INFO", "demo_info");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_sendstr(req, "<!doctype html><html><head><meta charset=\"utf-8\"><title>Demo info</title></head><body><h1>Demo info</h1><p>Use /api/status para ver os contadores expandidos.</p></body></html>");
 }
 
 static esp_err_t sensitive_handler(httpd_req_t *req)
@@ -766,7 +799,9 @@ static esp_err_t not_found_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
     increment_route_counter(req->uri);
-    log_http_event(req, req->uri, "WARN", "not_found");
+    if (strcmp(req->uri, "/favicon.ico") != 0) {
+        log_http_event(req, req->uri, "WARN", "not_found");
+    }
     httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "not found");
     return ESP_OK;
 }
