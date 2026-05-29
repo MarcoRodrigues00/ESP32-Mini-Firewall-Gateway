@@ -161,10 +161,11 @@ Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura si
 - Reconexão STA usa backoff simples fora do evento de disconnect para evitar tentativas em rajada.
 - Há diagnóstico leve no boot com heap livre, heap mínimo e high-water mark das tasks próprias quando disponível.
 
-## Pendências de bancada
+## Flash e particao
 
-- O build/upload observado na bancada mostrou aviso `Expected 4MB, found 2MB`. A flash real do módulo precisa ser confirmada no próximo teste físico.
-- Não alterar `board_build.flash_size` nem partições no escuro; se a bancada confirmar 2MB, ajustar `platformio.ini` em sprint própria.
+A unidade validada em bancada foi detectada como modulo de 4MB por `esptool.py flash_id`. A v2 declara `board_build.flash_size = 4MB`, `board_upload.flash_size = 4MB` e usa `partitions_4mb.csv`, com `nvs`, `phy_init` e uma particao `factory` de `0x200000` bytes. Nao ha filesystem/persistencia nesta sprint.
+
+Detalhes e riscos estao em [`docs/espidf-v2-flash-partition-sanity.md`](../../docs/espidf-v2-flash-partition-sanity.md).
 
 ## Limitações
 

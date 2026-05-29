@@ -1,0 +1,6 @@
+# Name,   Type, SubType, Offset,   Size,     Flags
+# 4MB flash sanity table for ESP-IDF Appliance v2.
+# No filesystem in this sprint. Space after factory is reserved for future persistence planning.
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  0x200000,

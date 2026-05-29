@@ -55,7 +55,7 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 10. Testar domínio didático suspeito, por exemplo `malware.test`, e confirmar evento SECURITY em `/logs` e incremento de `dns.suspicious_count`.
 11. Conferir `/clients` e `/api/clients` após navegação DNS para validar cliente, contadores, último domínio, score e classificação.
 12. Conferir `/traffic`, `/logs`, `/report`, `/dns` e `/api`.
-13. Confirmar no log serial se persiste o aviso `Expected 4MB, found 2MB`; se persistir, validar a flash real do módulo antes de mudar `platformio.ini`.
+13. Fazer upload manual com a tabela 4MB, confirmar que o aviso de flash nao reaparece e repetir smoke HTTP v2.
 14. Se o controlador/pinout do display estiverem confirmados, habilitar `APPLIANCE_V2_ENABLE_DISPLAY` em `include/config.local.h`, conferir tela NORMAL no boot e repetir os eventos de DNS suspeito/ATTACK observando o cooldown visual.
 15. Registrar evidências de tela, serial e JSON.
 
@@ -71,7 +71,7 @@ Criar uma PoC isolada em `experiments/espidf-appliance-v2/` para validar AP+STA,
 - `/clients` e `/api/clients` são RAM-only, com capacidade pequena, e não devem ser interpretados como IDS/IPS completo.
 - Proxy DNS é mínimo, experimental e de melhor esforço; a sprint cobre consultas A/AAAA simples e detecção por lista didática, sem bloqueio.
 - Eventos são RAM-only e filtrados para não registrar polling normal de `/`, `/api/status`, `/api/events`, `/api/dns`, `/logs`, `/traffic`, `/dns` e `/report`.
-- Flash mismatch `Expected 4MB, found 2MB` é pendência de bancada; não mexer em flash size nem partições até confirmação física.
+- Flash sanity concluido para a unidade de bancada detectada como 4MB; a v2 usa `partitions_4mb.csv` sem filesystem. Ver `docs/espidf-v2-flash-partition-sanity.md`.
 - Display local permanece desabilitado por padrao ate confirmar controlador e pinout do modulo real; falha de inicializacao nao deve derrubar AP/NAT/DNS/HTTP.
 
 ## Display local opcional
@@ -87,3 +87,8 @@ Estados e cooldowns:
 - `DISPLAY_STATE_ATTACK`: burst DNS, evento HTTP `SECURITY` recente ou maior `risk_score >= 15`; eventos recentes seguram o estado por ate 60 segundos.
 
 A tela mostra hora SNTP quando sincronizada, quantidade de clientes, maior score e ultimo dominio suspeito quando couber. Os checks `UP`, `NAT` e `IDS` usam verde/amarelo/vermelho/cinza para resumir upstream, NAT e estado do IDS localmente.
+
+
+## Flash/partition sanity
+
+A v2 foi ajustada para a unidade de bancada detectada como 4MB por `esptool.py flash_id`. O ambiente declara flash de 4MB, usa `partitions_4mb.csv` e mantem somente `nvs`, `phy_init` e `factory`; nao ha LittleFS/SPIFFS/FAT ainda. A persistencia deve ser uma sprint posterior, apos upload manual e novo smoke real com a tabela 4MB.
