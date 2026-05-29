@@ -38,7 +38,7 @@ evidencias/offline-check-YYYYMMDD-HHMMSS.md
 
 ## Offline check x smoke real
 
-O offline check nao acessa o ESP32, nao conecta ao AP, nao valida sensores, atuadores, LittleFS no hardware, Wi-Fi real nem comportamento eletrico da montagem. Ele serve para reduzir risco antes de testes de bancada.
+O offline check nao acessa o ESP32, nao conecta ao AP, nao valida sensores, atuadores, LittleFS no hardware, Wi-Fi real nem comportamento eletrico da montagem. Ele e a evidencia de desenvolvimento remoto via SSH e reduz risco antes dos testes de bancada.
 
 O smoke real continua obrigatorio quando for seguro conectar ao AP:
 

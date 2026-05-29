@@ -1402,22 +1402,27 @@ void appendEventsTableHtml(String &html, size_t limit)
     }
 
     const size_t rows = eventCount < limit ? eventCount : limit;
-    html += F("<table><thead><tr><th>ID</th><th>Tempo desde boot</th><th>Level</th><th>Source</th><th>Mensagem</th><th>Valor</th></tr></thead><tbody>");
+    html += F("<table class=\"events\"><thead><tr><th>ID</th><th>Tempo desde boot</th><th>Level</th><th>Source</th><th>Mensagem</th><th>Valor</th></tr></thead><tbody>");
     for (size_t offset = 0; offset < rows; ++offset) {
         const size_t newestOffset = eventCount - 1 - offset;
         const size_t index = (eventStart + newestOffset) % EVENT_CAPACITY;
         const EventRecord &event = events[index];
-        html += F("<tr><td>#");
+        const bool securityEvent = std::strcmp(event.level, "SECURITY") == 0 || std::strcmp(event.source, "IDS") == 0;
+        html += F("<tr");
+        if (securityEvent) {
+            html += F(" class=\"event-security\"");
+        }
+        html += F("><td>#");
         html += event.id;
-        html += F("</td><td>");
+        html += F("</td><td><strong class=\"time-label\">");
         html += uptimeLabel(event.uptimeMs);
-        html += F("</td><td><span class=\"badge ");
+        html += F("</strong></td><td><span class=\"badge ");
         html += levelClass(event.level);
         html += F("\">");
         html += event.level;
-        html += F("</span></td><td>");
+        html += F("</span></td><td><span class=\"source-tag\">");
         html += event.source;
-        html += F("</td><td>");
+        html += F("</span></td><td>");
         html += event.message;
         html += F("</td><td>");
         html += event.hasValue ? event.value : "-";
@@ -1430,15 +1435,16 @@ void appendEventsTableHtml(String &html, size_t limit)
 String sharedPageStyle()
 {
     String css;
-    css.reserve(3600);
-    css += F(":root{color-scheme:light;--bg:#eef1f5;--panel:#fff;--panel2:#f8fafc;--text:#17202a;--muted:#5d6876;--line:#d5dce5;--head:#172635;--head2:#223447;--link:#145ea8;--ok:#16735b;--warn:#9a6700;--err:#b42318;--sec:#5f6470}");
+    css.reserve(5200);
+    css += F(":root{color-scheme:light;--bg:#eef1f5;--panel:#fff;--panel2:#f8fafc;--text:#17202a;--muted:#5d6876;--line:#d5dce5;--head:#172635;--head2:#223447;--link:#145ea8;--ok:#16735b;--warn:#9a6700;--err:#b42318;--sec:#5f6470;--accent:#1f4f78}");
     css += F("*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Arial,Helvetica,sans-serif;font-size:15px}a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}");
     css += F("header{background:var(--head);color:#fff;border-bottom:4px solid var(--head2)}header .wrap,main{width:min(1120px,100%);margin:0 auto}header .wrap{padding:18px}h1{margin:0 0 5px;font-size:24px;line-height:1.2}header p{margin:0;color:#d6dee8;line-height:1.4}.header-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}");
     css += F("main{padding:16px}.toolbar,.toplinks{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}.btn,.linkbtn{display:inline-block;border:1px solid #b9c4d0;background:#fff;color:#1d3550;padding:8px 11px;border-radius:4px;min-height:34px}.btn.primary,.linkbtn.primary{background:#1f4f78;border-color:#1f4f78;color:#fff}.btn.warn{border-color:#c58b22}.btn.security{border-color:#9ba1aa}");
     css += F(".panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;margin-bottom:14px}.panel.tight{padding:12px}h2,h3{margin:0 0 10px}h2{font-size:18px}h3{font-size:16px;margin-top:14px}.note,.muted{color:var(--muted);line-height:1.45}.note{margin:8px 0 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px}");
     css += F(".metric{border:1px solid var(--line);border-radius:5px;padding:10px;background:var(--panel2)}.metric strong{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}.metric span{font-size:16px;word-break:break-word}.summary .metric span{font-size:17px}.badge{display:inline-block;border-radius:3px;padding:3px 7px;font-size:12px;font-weight:700;border:1px solid transparent;line-height:1.2}.ok,.info{background:#e7f4ef;color:var(--ok);border-color:#b7d9ce}.planned,.wait,.warn{background:#fff3d7;color:var(--warn);border-color:#e2c06d}.error{background:#fde8e5;color:var(--err);border-color:#f3b7af}.security{background:#eceff3;color:#4f5661;border-color:#c7ccd3}");
     css += F("table{width:100%;border-collapse:collapse;margin-top:8px;background:#fff}th,td{border:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}th{background:#f1f5f9;color:#445160;font-size:12px;font-weight:700}td{font-size:14px}.table-wrap{overflow-x:auto}.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}code{background:#eef2f6;border:1px solid var(--line);padding:2px 4px;border-radius:3px}label{display:block;font-size:13px;font-weight:700;color:var(--muted);margin:0 0 5px}input{width:100%;border:1px solid var(--line);border-radius:4px;padding:9px;font:inherit;background:#fff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}form.inline{display:inline}");
-    css += F("@media(max-width:760px){main{padding:12px}.cols{grid-template-columns:1fr}header .wrap{padding:15px}h1{font-size:21px}.toolbar,.toplinks{gap:6px}.btn,.linkbtn{padding:8px 9px}.metric span{font-size:15px}} ");
+    css += F(".hero{background:#fff;border:1px solid var(--line);border-left:5px solid var(--accent);border-radius:6px;padding:16px;margin-bottom:14px}.hero h2{font-size:22px}.hero p{max-width:860px}.status-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:12px}.status-item{background:#f6f8fb;border:1px solid var(--line);border-radius:5px;padding:8px}.status-item strong{display:block;font-size:11px;color:var(--muted);margin-bottom:4px}.flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.flow-card{border:1px solid var(--line);border-radius:6px;padding:12px;background:#fff}.flow-card.primary{border-color:#8fb2d1;background:#f4f8fc}.flow-card h3{margin-top:0}.metric.alert{border-color:#d5b06a;background:#fff8e8}.metric.danger{border-color:#e0a39b;background:#fff0ee}.metric.security{background:#f3f5f8}.route-count{font-weight:700;text-align:right}.time-label{font-family:monospace;font-size:14px;color:#182b3d}.source-tag{font-size:12px;font-weight:700;color:#445160}.events tr.event-security td{background:#f7f8fa}.events tr.event-security td:first-child{border-left:4px solid var(--sec)}.report-section{border-left:4px solid #c7d7e6}.limit-box{border-color:#d9b16d;background:#fff8e8}.small{font-size:13px}.mono{font-family:monospace}");
+    css += F("@media(max-width:760px){main{padding:12px}.cols{grid-template-columns:1fr}header .wrap{padding:15px}h1{font-size:21px}.toolbar,.toplinks{gap:6px}.btn,.linkbtn{padding:8px 9px}.metric span{font-size:15px}.hero h2{font-size:20px}} ");
     return css;
 }
 
@@ -1570,7 +1576,8 @@ String reportPage()
     appendPageHead(html, "Relatorio de evidencia - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Relatorio de evidencia", "Este relatorio resume o estado atual do prototipo.");
     html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/evidencias\">Evidencias</a><a class=\"btn\" href=\"/traffic\">Traffic</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/report\">/api/report</a></div>");
-    html += F("<div class=\"panel\"><h2>Identificacao do projeto</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Projeto</strong><span>");
+    html += F("<section class=\"hero\"><h2>Resumo executivo</h2><p class=\"note\">Relatorio de evidencia do prototipo em execucao: estado do ESP32, rede AP+STA, seguranca didatica, Traffic Monitor HTTP, logs, persistencia e limitacoes assumidas para a defesa.</p></section>");
+    html += F("<div class=\"panel report-section\"><h2>Identificacao do projeto</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Projeto</strong><span>");
     appendHtmlEscaped(html, PROJECT_NAME);
     html += F("</span></div><div class=\"metric\"><strong>Firmware</strong><span>");
     appendHtmlEscaped(html, PROJECT_VERSION);
@@ -1578,7 +1585,7 @@ String reportPage()
     appendHtmlEscaped(html, PROJECT_PHASE);
     html += F("</span></div></div><p class=\"note\">Relatorio tecnico embarcado para apresentacao, auditoria simples e documentacao final.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Status geral</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Uptime</strong><span>");
+    html += F("<div class=\"panel report-section\"><h2>Status geral</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Uptime</strong><span>");
     html += metrics.uptimeSeconds;
     html += F("s</span></div><div class=\"metric\"><strong>Heap livre</strong><span>");
     html += metrics.freeHeap;
@@ -1590,7 +1597,7 @@ String reportPage()
     html += firewall.securityEvents;
     html += F("</span></div></div></div>");
 
-    html += F("<div class=\"panel\"><h2>Rede e gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>AP SSID</strong><span>");
+    html += F("<div class=\"panel report-section\"><h2>Rede e gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>AP SSID</strong><span>");
     appendHtmlEscaped(html, gateway.apSsid);
     html += F("</span></div><div class=\"metric\"><strong>AP IP</strong><span>");
     appendHtmlEscaped(html, gateway.apIp);
@@ -1604,21 +1611,21 @@ String reportPage()
     appendHtmlEscaped(html, nat.lastStatus);
     html += F("</span></div></div><p class=\"note\">A PoC de NAT real fica em branch experimental ESP-IDF. Na main, NAT e experimental com fallback e telemetria clara.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Firewall/IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Requests firewall</strong><span>");
+    html += F("<div class=\"panel report-section\"><h2>Firewall/IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Requests firewall</strong><span>");
     html += firewall.totalRequests;
-    html += F("</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += F("</span></div><div class=\"metric security\"><strong>Eventos IDS</strong><span>");
     html += firewall.idsEvents;
-    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>404 suspeitos</strong><span>");
     html += firewall.suspicious404Count;
-    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>Rotas sensiveis</strong><span>");
     html += firewall.sensitivePathHits;
     html += F("</span></div></div><p class=\"note\">Este prototipo nao substitui firewall/IDS profissional.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Traffic Monitor</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total HTTP</strong><span>");
+    html += F("<div class=\"panel report-section\"><h2>Traffic Monitor</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total HTTP</strong><span>");
     html += traffic.totalRequests;
     html += F("</span></div><div class=\"metric\"><strong>404 count</strong><span>");
     html += traffic.notFoundCount;
-    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>Rotas sensiveis</strong><span>");
     html += traffic.sensitivePathHits;
     html += F("</span></div><div class=\"metric\"><strong>Scans suspeitos</strong><span>");
     html += traffic.suspiciousScanCount;
@@ -1630,7 +1637,7 @@ String reportPage()
     appendHtmlEscaped(html, topRoute);
     html += F("</span></div></div><p class=\"note\">O monitoramento HTTP e didatico e limitado ao painel embarcado.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Logs e persistencia</h2><div class=\"grid summary\"><div class=\"metric\"><strong>LittleFS</strong><span>");
+    html += F("<div class=\"panel report-section\"><h2>Logs e persistencia</h2><div class=\"grid summary\"><div class=\"metric\"><strong>LittleFS</strong><span>");
     html += littleFsAvailable ? "ativo" : "indisponivel";
     html += F("</span></div><div class=\"metric\"><strong>Arquivo persistente</strong><span>");
     html += logSize;
@@ -1638,10 +1645,10 @@ String reportPage()
     html += PERSISTENT_EVENTS_MAX_SIZE;
     html += F(" bytes</span></div></div><p class=\"note\">Persistencia seletiva para WARN, ERROR, SECURITY e eventos importantes.</p></div>");
 
-    html += F("<div class=\"panel\"><h2>Eventos recentes</h2><p class=\"note\">Tempo exibido em HH:MM:SS.mmm desde o boot.</p><div class=\"table-wrap\">");
+    html += F("<div class=\"panel report-section\"><h2>Eventos recentes</h2><p class=\"note\">Tempo exibido em HH:MM:SS.mmm desde o boot.</p><div class=\"table-wrap\">");
     appendEventsTableHtml(html, 8);
     html += F("</div></div>");
-    html += F("<div class=\"panel\"><h2>Limitacoes tecnicas</h2><ul><li>Monitoramento HTTP didatico limitado ao painel embarcado.</li><li>Nao faz sniffing de pacotes nem inspecao HTTPS.</li><li>Este prototipo nao substitui firewall/IDS profissional.</li><li>A PoC de NAT real fica em branch experimental ESP-IDF separada.</li></ul></div>");
+    html += F("<div class=\"panel limit-box\"><h2>Limitacoes tecnicas</h2><ul><li>Monitoramento HTTP didatico limitado ao painel embarcado.</li><li>Nao faz sniffing de pacotes nem inspecao HTTPS.</li><li>Este prototipo nao substitui firewall/IDS profissional.</li><li>A PoC de NAT real fica em branch experimental ESP-IDF separada.</li></ul></div>");
     html += F("<div class=\"panel\"><h2>Como validar</h2><ul><li>Abrir <code>/api/report</code> e conferir o resumo JSON.</li><li>Executar <code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code> quando conectado ao AP.</li><li>Gerar <code>/demo/scan</code> e verificar eventos SECURITY/IDS em <code>/logs</code>.</li><li>Comparar <code>/report</code>, <code>/api/status</code> e <code>/api/traffic</code>.</li></ul></div>");
     html += F("</main></body></html>");
     return html;
@@ -1655,7 +1662,8 @@ String evidencePage()
     html.reserve(7600);
     appendPageHead(html, "Evidencia de execucao - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Evidencia de execucao", "Resumo tecnico para print do firmware em execucao no ESP32.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/report\">Relatorio consolidado</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/api/status\">/api/status</a><a class=\"btn\" href=\"/api/events\">/api/events</a></div>");
+    html += F("<section class=\"hero\"><h2>Evidencias da sprint</h2><p class=\"note\"><a href=\"/report\">/report</a> consolida o estado do firmware. O smoke real fica para a bancada conectada ao AP; durante desenvolvimento remoto via SSH, o check local <code>tools/offline_project_check.py</code> reduz risco sem trocar a rede do notebook.</p></section>");
     html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Versao</strong><span>");
     html += PROJECT_VERSION;
     html += F("</span></div><div class=\"metric\"><strong>IP AP</strong><span>");
@@ -1753,16 +1761,17 @@ String trafficPage()
     html.reserve(6200);
     appendPageHead(html, "Traffic Monitor - ESP32 Mini Firewall Gateway");
     appendHeader(html, "Traffic Monitor HTTP", "Monitoramento didatico do trafego HTTP recebido pelo painel embarcado.");
-    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/gateway\">Gateway</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/traffic\">/api/traffic</a><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></div>");
+    html += F("<main><div class=\"toolbar\"><a class=\"btn primary\" href=\"/\">Dashboard</a><a class=\"btn\" href=\"/logs\">Logs</a><a class=\"btn\" href=\"/report\">Relatorio</a><a class=\"btn\" href=\"/api/traffic\">/api/traffic</a><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></div>");
+    html += F("<section class=\"hero\"><h2>Leitura HTTP do painel</h2><p class=\"note\">Esta tela resume somente as requisicoes HTTP recebidas pelo servidor web embarcado. Nao ha sniffing de pacotes, modo promiscuo, inspecao HTTPS ou promessa de IDS/IPS profissional.</p></section>");
     html += F("<div class=\"panel\"><h2>Resumo de trafego</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Total requests</strong><span>");
     html += traffic.totalRequests;
-    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>404 suspeitos</strong><span>");
     html += traffic.notFoundCount;
-    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>Rotas sensiveis</strong><span>");
     html += traffic.sensitivePathHits;
-    html += F("</span></div><div class=\"metric\"><strong>Scans detectados</strong><span>");
+    html += F("</span></div><div class=\"metric danger\"><strong>Scans detectados</strong><span>");
     html += traffic.suspiciousScanCount;
-    html += F("</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += F("</span></div><div class=\"metric security\"><strong>Eventos IDS</strong><span>");
     html += traffic.idsEvents;
     html += F("</span></div><div class=\"metric\"><strong>Janela IDS</strong><span>");
     html += traffic.scanWindow404Count;
@@ -1782,7 +1791,7 @@ String trafficPage()
     html += F("</span></div><div class=\"metric\"><strong>User-Agent resumido</strong><span>");
     appendHtmlEscaped(html, traffic.lastUserAgentShort);
     html += F("</span></div></div></div>");
-    html += F("<div class=\"panel\"><h2>Top rotas acessadas</h2><div class=\"table-wrap\"><table><thead><tr><th>Rota</th><th>Requests</th></tr></thead><tbody>");
+    html += F("<div class=\"panel\"><h2>Top rotas acessadas</h2><div class=\"table-wrap\"><table><thead><tr><th>Rota</th><th class=\"route-count\">Requests</th></tr></thead><tbody>");
     bool hasRoutes = false;
     for (size_t index = 0; index < sizeof(traffic.topRoutes) / sizeof(traffic.topRoutes[0]); ++index) {
         if (traffic.topRoutes[index].route[0] == '\0') {
@@ -1791,7 +1800,7 @@ String trafficPage()
         hasRoutes = true;
         html += F("<tr><td>");
         appendHtmlEscaped(html, traffic.topRoutes[index].route);
-        html += F("</td><td>");
+        html += F("</td><td class=\"route-count\">");
         html += traffic.topRoutes[index].count;
         html += F("</td></tr>");
     }
@@ -1810,10 +1819,10 @@ String htmlPage()
     html.reserve(9200);
     appendPageHead(html, "ESP32 Mini Firewall Gateway");
     appendHeader(html, PROJECT_NAME, "Mini IDS portatil, Mini Firewall Gateway e monitor ciberfisico em ESP32 para laboratorio didatico de seguranca.");
-    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/wifi\">Wi-Fi</a><a class=\"linkbtn\" href=\"/logs\">Logs</a><a class=\"linkbtn\" href=\"/report\">Relatorio</a><a class=\"linkbtn\" href=\"/api/status\">API status</a><a class=\"linkbtn\" href=\"/api/events\">API eventos</a></div>");
-    html += F("<div class=\"panel\"><h2>Resumo</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"metric\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"metric\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"metric\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></div>");
-    html += F("<div class=\"panel tight\"><h2>Traffic Monitor HTTP</h2><p class=\"note\"><a href=\"/traffic\">Abrir /traffic</a> para ver total de requests, top rotas, 404 suspeitos, rotas sensiveis e eventos IDS. Monitoramento didatico do HTTP do painel, sem sniffing de HTTPS.</p></div>");
-    html += F("<div class=\"panel\"><h2>Firewall didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric\"><strong>Eventos IDS</strong><span id=\"idsEvents\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
+    html += F("<main><div class=\"toplinks\"><a class=\"linkbtn primary\" href=\"/traffic\">Traffic</a><a class=\"linkbtn primary\" href=\"/logs\">Logs</a><a class=\"linkbtn primary\" href=\"/report\">Relatorio</a><a class=\"linkbtn\" href=\"/gateway\">Gateway</a><a class=\"linkbtn\" href=\"/wifi\">Wi-Fi</a><a class=\"linkbtn\" href=\"/evidencias\">Evidencias</a><a class=\"linkbtn\" href=\"/demo\">Demo</a><a class=\"linkbtn\" href=\"/api/status\">API status</a></div>");
+    html += F("<section class=\"hero\"><h2>Mini appliance portatil de seguranca</h2><p class=\"note\">Painel embarcado para demonstrar AP+STA, firewall didatico, Mini IDS, Traffic Monitor HTTP, logs persistentes e evidencias em um ESP32 fisico. A main usa Arduino/WebServer.h; NAT real validado fica em PoC ESP-IDF separada.</p><div class=\"status-strip\"><div class=\"status-item\"><strong>Status</strong><span id=\"status\">n/d</span></div><div class=\"status-item\"><strong>IP AP</strong><span id=\"apIp\">n/d</span></div><div class=\"status-item\"><strong>Uptime</strong><span id=\"uptime\">n/d</span></div><div class=\"status-item\"><strong>Eventos</strong><span id=\"eventCount\">n/d</span></div></div></section>");
+    html += F("<div class=\"panel\"><h2>Mapa do appliance</h2><div class=\"flow\"><div class=\"flow-card\"><h3>Rede/Gateway</h3><p class=\"note\">AP local, upstream Wi-Fi e telemetria AP+STA.</p><a class=\"btn\" href=\"/gateway\">Gateway</a></div><div class=\"flow-card\"><h3>Mini IDS</h3><p class=\"note\">Eventos didaticos de flood, 404 e rotas sensiveis.</p><a class=\"btn security\" href=\"/demo/scan\">Demo scan</a></div><div class=\"flow-card\"><h3>Firewall didatico</h3><p class=\"note\">Rate limit e contadores sobre o HTTP do painel.</p><a class=\"btn\" href=\"/logs\">Ver eventos</a></div><div class=\"flow-card primary\"><h3>Traffic Monitor</h3><p class=\"note\">Leitura dos acessos HTTP recebidos pelo painel.</p><a class=\"btn primary\" href=\"/traffic\">Abrir /traffic</a></div><div class=\"flow-card primary\"><h3>Logs e Evidencia</h3><p class=\"note\">Eventos em RAM, persistencia LittleFS e exportacao JSON.</p><a class=\"btn primary\" href=\"/logs\">Abrir /logs</a></div><div class=\"flow-card primary\"><h3>Relatorio</h3><p class=\"note\">Resumo executivo para defesa e auditoria local.</p><a class=\"btn primary\" href=\"/report\">Abrir /report</a></div></div></div>");
+    html += F("<div class=\"panel\"><h2>Firewall didatico e Mini IDS</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span id=\"fwStatus\">n/d</span></div><div class=\"metric\"><strong>Requisicoes HTTP</strong><span id=\"fwRequests\">n/d</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span id=\"fwSecurity\">n/d</span></div><div class=\"metric security\"><strong>Eventos IDS</strong><span id=\"idsEvents\">n/d</span></div><div class=\"metric\"><strong>Ultima rota</strong><span id=\"fwRoute\">n/d</span></div><div class=\"metric\"><strong>Ultimo IP</strong><span id=\"fwIp\">n/d</span></div><div class=\"metric\"><strong>Regra de flood</strong><span id=\"fwRule\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Gateway</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Modo</strong><span id=\"gwMode\">n/d</span></div><div class=\"metric\"><strong>Upstream</strong><span id=\"gwUpstream\">n/d</span></div><div class=\"metric\"><strong>Config upstream</strong><span id=\"gwConfigured\">n/d</span></div><div class=\"metric\"><strong>AP IP</strong><span id=\"gwApIp\">n/d</span></div><div class=\"metric\"><strong>IP upstream</strong><span id=\"gwUpIp\">n/d</span></div><div class=\"metric\"><strong>RSSI</strong><span id=\"gwRssi\">n/d</span></div><div class=\"metric\"><strong>Clientes AP</strong><span id=\"gwClients\">n/d</span></div><div class=\"metric\"><strong>Configurar</strong><span><a href=\"/wifi\">/wifi</a></span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Metricas do sistema</h2><div class=\"grid\"><div class=\"metric\"><strong>Heap livre</strong><span id=\"freeHeap\">n/d</span></div><div class=\"metric\"><strong>Heap minimo</strong><span id=\"minFreeHeap\">n/d</span></div><div class=\"metric\"><strong>Flash</strong><span id=\"flashSize\">n/d</span></div><div class=\"metric\"><strong>Sketch</strong><span id=\"sketchSize\">n/d</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Energia</h2><div class=\"grid\"><div class=\"metric\"><strong>INA219</strong><span id=\"energyStatus\">n/d</span></div><div class=\"metric\"><strong>Tensao</strong><span id=\"energyVoltage\">n/d</span></div><div class=\"metric\"><strong>Corrente</strong><span id=\"energyCurrent\">n/d</span></div><div class=\"metric\"><strong>Potencia</strong><span id=\"energyPower\">n/d</span></div><div class=\"metric\"><strong>Ultimo update</strong><span id=\"energyUpdated\">n/d</span></div><div class=\"metric\"><strong>Alertas</strong><span id=\"energyAlert\">n/d</span></div></div></div>");
@@ -1854,20 +1863,17 @@ String demoPage()
     html += F("</span></div></div></div>");
     html += F("<div class=\"panel\"><h2>Roteiro em etapas</h2><div class=\"table-wrap\"><table><thead><tr><th>Etapa</th><th>Objetivo</th><th>Acao</th></tr></thead><tbody>");
     html += F("<tr><td>1</td><td>Verificar status do sistema</td><td><a class=\"btn\" href=\"/\">Abrir dashboard</a></td></tr>");
-    html += F("<tr><td>2</td><td>Verificar Gateway AP+STA</td><td><a class=\"btn\" href=\"/gateway\">Abrir gateway</a></td></tr>");
-    html += F("<tr><td>3</td><td>Gerar evento informativo</td><td><a class=\"btn\" href=\"/demo/info\">Gerar INFO</a></td></tr>");
-    html += F("<tr><td>4</td><td>Gerar alerta WARN</td><td><a class=\"btn warn\" href=\"/demo/warn\">Gerar WARN</a></td></tr>");
-    html += F("<tr><td>5</td><td>Gerar evento SECURITY</td><td><a class=\"btn security\" href=\"/demo/security\">Gerar SECURITY</a></td></tr>");
-    html += F("<tr><td>6</td><td>Simular flood HTTP</td><td><a class=\"btn security\" href=\"/demo/flood\">Simular flood</a></td></tr>");
-    html += F("<tr><td>7</td><td>Simular IDS</td><td><a class=\"btn security\" href=\"/demo/ids\">Simular IDS</a></td></tr>");
-    html += F("<tr><td>8</td><td>Simular scan basico</td><td><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></td></tr>");
-    html += F("<tr><td>9</td><td>Abrir Traffic Monitor</td><td><a class=\"btn\" href=\"/traffic\">Abrir /traffic</a></td></tr>");
-    html += F("<tr><td>10</td><td>Ver logs em RAM</td><td><a class=\"btn\" href=\"/logs\">Abrir logs</a></td></tr>");
-    html += F("<tr><td>11</td><td>Ver logs persistentes</td><td><a class=\"btn\" href=\"/api/events/persistent\">Abrir JSON persistente</a></td></tr>");
-    html += F("<tr><td>12</td><td>Validar com smoke tester externo</td><td><code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code></td></tr>");
+    html += F("<tr><td>2</td><td>Abrir Traffic Monitor</td><td><a class=\"btn\" href=\"/traffic\">Abrir /traffic</a></td></tr>");
+    html += F("<tr><td>3</td><td>Gerar demo scan HTTP</td><td><a class=\"btn security\" href=\"/demo/scan\">Simular scan</a></td></tr>");
+    html += F("<tr><td>4</td><td>Ver evento SECURITY/IDS</td><td><a class=\"btn\" href=\"/logs\">Abrir logs</a></td></tr>");
+    html += F("<tr><td>5</td><td>Consolidar evidencia</td><td><a class=\"btn\" href=\"/report\">Abrir /report</a></td></tr>");
+    html += F("<tr><td>6</td><td>Verificar Gateway AP+STA</td><td><a class=\"btn\" href=\"/gateway\">Abrir gateway</a></td></tr>");
+    html += F("<tr><td>7</td><td>Gerar eventos opcionais</td><td><a class=\"btn\" href=\"/demo/info\">INFO</a> <a class=\"btn warn\" href=\"/demo/warn\">WARN</a> <a class=\"btn security\" href=\"/demo/security\">SECURITY</a></td></tr>");
+    html += F("<tr><td>8</td><td>Validar em bancada conectada ao AP</td><td><code>python3 tools/smoke_test_http.py --base-url http://192.168.4.1</code></td></tr>");
+    html += F("<tr><td>9</td><td>Desenvolvimento remoto via SSH</td><td><code>python3 tools/offline_project_check.py</code></td></tr>");
     html += F("</tbody></table></div></div>");
-    html += F("<div class=\"cols\"><div class=\"panel\"><h2>Como apresentar</h2><ul><li>Primeiro mostro o painel local do ESP32.</li><li>Depois mostro o gateway didatico e o AP.</li><li>Em seguida simulo eventos de seguranca.</li><li>Os eventos aparecem em RAM e nos logs persistentes.</li><li>Por fim, executo o smoke test para validar as rotas.</li></ul></div>");
-    html += F("<div class=\"panel\"><h2>Limitacoes</h2><ul><li>NAT/roteamento real nao implementado nesta fase.</li><li>IDS e didatico e baseado em HTTP do painel.</li><li>Nao inspeciona HTTPS.</li><li>Sensores fisicos ficam para fase final.</li><li>INA219 esta preparado no firmware, mas teste fisico depende de montagem/solda.</li></ul></div></div>");
+    html += F("<div class=\"cols\"><div class=\"panel\"><h2>Como apresentar</h2><ul><li>Primeiro mostro o painel local do ESP32.</li><li>Depois abro /traffic e gero o demo scan.</li><li>Em seguida mostro /logs com destaque para SECURITY/IDS.</li><li>O /report consolida a evidencia embarcada.</li><li>Smoke real fica para bancada; via SSH uso o offline check local.</li></ul></div>");
+    html += F("<div class=\"panel\"><h2>Limitacoes</h2><ul><li>NAT real validado fica na PoC ESP-IDF separada.</li><li>IDS e didatico e baseado em HTTP do painel.</li><li>Nao inspeciona HTTPS.</li><li>Sensores fisicos ficam para fase final.</li><li>INA219 esta preparado no firmware, mas teste fisico depende de montagem/solda.</li></ul></div></div>");
     html += F("<div class=\"panel tight\"><h2>APIs para demonstracao</h2><p class=\"note\"><a href=\"/api/status\">/api/status</a> mostra metricas, gateway e IDS. <a href=\"/api/events\">/api/events</a> mostra o buffer em RAM. <a href=\"/api/events/persistent\">/api/events/persistent</a> mostra eventos relevantes salvos em LittleFS. <a href=\"/report\">/report</a> consolida a evidencia embarcada.</p></div>");
     html += F("</main></body></html>");
     return html;
@@ -2054,11 +2060,11 @@ String buildGatewayPage()
     html += F("</span></div><div class=\"metric\"><strong>Ultimo erro</strong><span>");
     appendHtmlEscaped(html, gateway.lastError[0] != '\0' ? gateway.lastError : "n/d");
     html += F("</span></div><div class=\"metric\"><strong>Configuracao</strong><span><a href=\"/wifi\">/wifi</a></span></div></div><p class=\"note\">NAT/roteamento real nao faz parte desta sprint; a funcao e telemetria AP+STA, configuracao upstream e demonstracao didatica de IDS.</p></div>");
-    html += F("<div class=\"panel\"><h2>IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric\"><strong>Eventos IDS</strong><span>");
+    html += F("<div class=\"panel\"><h2>IDS didatico</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Status</strong><span><span class=\"badge ok\">ativo</span></span></div><div class=\"metric security\"><strong>Eventos IDS</strong><span>");
     html += firewall.idsEvents;
-    html += F("</span></div><div class=\"metric\"><strong>404 suspeitos</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>404 suspeitos</strong><span>");
     html += firewall.suspicious404Count;
-    html += F("</span></div><div class=\"metric\"><strong>Rotas sensiveis</strong><span>");
+    html += F("</span></div><div class=\"metric alert\"><strong>Rotas sensiveis</strong><span>");
     html += firewall.sensitivePathHits;
     html += F("</span></div></div><p class=\"note\">Deteccao baseada em HTTP do painel: flood, rotas inexistentes e caminhos sensiveis simulados. Nao inspeciona HTTPS e nao substitui IDS/IPS real.</p></div></main></body></html>");
     return html;

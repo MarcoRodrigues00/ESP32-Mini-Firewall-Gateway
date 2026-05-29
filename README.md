@@ -95,7 +95,7 @@ Rotas principais:
 
 ## Demo guiada
 
-A rota `/demo` centraliza o roteiro de apresentacao do TDE. Ela mostra um resumo do sistema, links rapidos para dashboard, gateway, evidencias, logs e APIs, e uma sequencia de etapas para gerar eventos INFO, WARN, SECURITY, flood didatico e IDS didatico. A pagina tambem lista limitacoes honestas: NAT/roteamento real nao implementado nesta fase, IDS baseado em HTTP do painel, ausencia de inspecao HTTPS e sensores fisicos deixados para fase final.
+A rota `/demo` centraliza o roteiro de apresentacao do TDE. Ela prioriza o fluxo dashboard, `/traffic`, demo scan, `/logs`, `/report`, smoke real em bancada e offline check durante desenvolvimento remoto via SSH. A pagina tambem lista limitacoes honestas: NAT real fica em PoC separada ESP-IDF, IDS baseado em HTTP do painel, ausencia de inspecao HTTPS e sensores fisicos deixados para fase final.
 
 ## API de status
 

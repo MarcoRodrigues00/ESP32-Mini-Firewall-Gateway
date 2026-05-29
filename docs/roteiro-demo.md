@@ -5,9 +5,9 @@ Este roteiro serve como guia de fala para apresentar o ESP32 Mini Firewall Gatew
 ## Preparacao
 
 1. Ligar o ESP32 e aguardar o boot.
-2. No computador ou celular, conectar ao AP `ESP32-Firewall-Lab`.
+2. Na bancada, conectar o computador ou celular ao AP `ESP32-Firewall-Lab`.
 3. Abrir o navegador em `http://192.168.4.1/demo`.
-4. Manter tambem uma aba com `http://192.168.4.1/`.
+4. Em desenvolvimento remoto via SSH, nao trocar a rede do notebook para pequenos testes; usar `pio run` e `python3 tools/offline_project_check.py`.
 
 Fala sugerida: "O sistema esta rodando fisicamente no ESP32. O proprio microcontrolador cria o ponto de acesso local e hospeda a interface web, entao a demonstracao nao depende de servidor externo."
 
@@ -96,7 +96,7 @@ No terminal, a partir da raiz do projeto:
 python3 tools/smoke_test_http.py --base-url http://192.168.4.1
 ```
 
-Fala sugerida: "O smoke test externo valida as principais paginas, APIs e rotas demo. Ele substitui prints repetitivos durante desenvolvimento, mas as evidencias finais ainda serao coletadas nos marcos grandes."
+Fala sugerida: "O smoke test externo valida as principais paginas, APIs e rotas demo quando a maquina estiver conectada ao AP. Em desenvolvimento remoto via SSH, usar o offline check local para evitar derrubar a sessao de rede; o smoke real fica para validacao em lote na bancada."
 
 ## Explicar limitacoes
 
@@ -152,7 +152,7 @@ Fala sugerida: "Este monitor e didatico e observa apenas o HTTP do painel embarc
 
 ## Mostrar relatorio embarcado
 
-Abrir `/report` depois do dashboard e antes dos logs finais. Mostrar que a pagina resume o estado atual do prototipo, incluindo rede, gateway, NAT experimental, firewall/IDS didatico, Traffic Monitor, persistencia e eventos recentes.
+Abrir `/report` depois de `/traffic`, do demo scan e dos logs finais. Mostrar que a pagina resume o estado atual do prototipo, incluindo rede, gateway, NAT experimental, firewall/IDS didatico, Traffic Monitor, persistencia e eventos recentes.
 
 Fala sugerida: "Este relatorio embarcado facilita a evidencia de bancada. Ele nao substitui o smoke test externo; ele resume visualmente o estado que o smoke test valida por HTTP."
 
