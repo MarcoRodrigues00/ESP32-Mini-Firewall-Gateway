@@ -12,6 +12,9 @@ PoC isolada para unir NAT/NAPT real em ESP-IDF com um dashboard HTTP demonstráv
 - Eventos filtrados de boot, Wi-Fi, NAT e segurança didática mantidos em RAM.
 - Requests normais de dashboard/API não viram evento de log para evitar ruído de polling.
 - Contadores de tráfego HTTP, 404, rotas sensíveis, demo scan, total requests e top routes simples.
+- SNTP iniciado após IP no STA, com horário `America/Sao_Paulo` quando houver internet.
+- Monitor/proxy DNS UDP porta 53 para consultas A/AAAA dos clientes do AP, com encaminhamento para `1.1.1.1` e fallback `8.8.8.8`.
+- Lista didática de domínios suspeitos: `malware.test`, `phishing.test`, `suspicious.test` e `bad.example`.
 - Dashboard local sem CDN.
 
 ## Configuração local
@@ -38,6 +41,8 @@ pio run -d experiments/espidf-appliance-v2
 - `/api`
 - `/api/status`
 - `/api/events`
+- `/api/dns`
+- `/dns`
 - `/logs`
 - `/traffic`
 - `/report`
@@ -57,7 +62,15 @@ Rotas sensíveis registradas para demonstração didática:
 - `/config`
 - `/debug`
 
-Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura simples incrementam também `suspicious_scan_count`. Requests normais como `/`, `/api/status`, `/api/events`, `/logs`, `/traffic` e `/report` continuam contabilizados em `/traffic`, mas não geram evento INFO a cada polling.
+Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura simples incrementam também `suspicious_scan_count`. Requests normais como `/`, `/api/status`, `/api/events`, `/api/dns`, `/logs`, `/traffic`, `/dns` e `/report` continuam contabilizados em `/traffic`, mas não geram evento INFO a cada polling.
+
+## DNS e horário
+
+- O DHCP do AP entrega o próprio ESP32 (`192.168.4.1`) como DNS.
+- O proxy DNS registra domínio, IP do cliente, tipo A/AAAA, uptime e timestamp quando SNTP estiver sincronizado.
+- Consultas comuns ficam em uma lista própria `recent_queries` e não geram evento para cada domínio.
+- O primeiro domínio observado gera evento INFO; domínios da lista didática suspeita geram evento SECURITY e incrementam `suspicious_count`.
+- `/api/status` expõe `time.*` e resumo `dns.*`; `/api/dns` expõe o histórico DNS recente.
 
 ## Pendências de bancada
 
@@ -66,10 +79,12 @@ Essas rotas incrementam `sensitive_path_hits`; rotas com padrão de varredura si
 
 ## Limitações
 
-- Não há firewall profissional, IDS/IPS completo, WAF, SIEM, sniffing nem inspeção HTTPS.
+- Não há firewall profissional, IDS/IPS completo, WAF, SIEM, sniffing de conteúdo nem inspeção HTTPS.
+- O monitor DNS mostra domínios consultados, não conteúdo das páginas.
 - Eventos ficam somente em RAM e são perdidos ao reiniciar.
 - Logs são filtrados; use `/traffic` para observar requests normais e top routes.
-- Os contadores de rotas são simples e não persistentes.
+- Os contadores de rotas e DNS são simples, RAM-only e não persistentes.
+- O proxy DNS é mínimo e didático; registra consultas A/AAAA simples e encaminha por UDP em melhor esforço.
 - NAT depende de upstream STA com IP válido.
 - Sem persistência, sensores, atuadores e FreeRTOS completo nesta PoC.
 - Sem senha real em arquivo versionável.

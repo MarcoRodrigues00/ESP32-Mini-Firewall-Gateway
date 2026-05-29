@@ -4,16 +4,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include "config.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_sntp.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "lwip/inet.h"
 #include "lwip/lwip_napt.h"
@@ -26,24 +32,33 @@
 #define AP_IP_B 168
 #define AP_IP_C 4
 #define AP_IP_D 1
-#define DNS_PRIMARY_A 1
-#define DNS_PRIMARY_B 1
-#define DNS_PRIMARY_C 1
-#define DNS_PRIMARY_D 1
-#define DNS_BACKUP_A 8
-#define DNS_BACKUP_B 8
-#define DNS_BACKUP_C 8
-#define DNS_BACKUP_D 8
+#define DNS_PRIMARY_A AP_IP_A
+#define DNS_PRIMARY_B AP_IP_B
+#define DNS_PRIMARY_C AP_IP_C
+#define DNS_PRIMARY_D AP_IP_D
+#define DNS_BACKUP_A AP_IP_A
+#define DNS_BACKUP_B AP_IP_B
+#define DNS_BACKUP_C AP_IP_C
+#define DNS_BACKUP_D AP_IP_D
 #define STA_MAXIMUM_RETRY 8
 #define EVENT_CAPACITY 32
 #define EVENT_MESSAGE_LEN 128
 #define ROUTE_TRACK_CAPACITY 12
 #define LAST_ROUTE_LEN 32
+#define TIMESTAMP_LEN 32
+#define DNS_RECENT_CAPACITY 16
+#define DNS_DOMAIN_LEN 64
+#define DNS_QUERY_TYPE_LEN 8
+#define DNS_CLIENT_LEN 24
+#define DNS_PACKET_MAX 512
+#define DNS_PROXY_PORT 53
 
 typedef struct {
     uint32_t id;
     uint64_t uptime_ms;
     char time_label[16];
+    char timestamp[TIMESTAMP_LEN];
+    bool time_synced;
     char level[12];
     char source[16];
     char message[EVENT_MESSAGE_LEN];
@@ -76,6 +91,18 @@ typedef struct {
     uint64_t count;
 } route_stat_t;
 
+typedef struct {
+    uint32_t id;
+    uint64_t uptime_ms;
+    char time_label[16];
+    char timestamp[TIMESTAMP_LEN];
+    bool time_synced;
+    char client[DNS_CLIENT_LEN];
+    char domain[DNS_DOMAIN_LEN];
+    char query_type[DNS_QUERY_TYPE_LEN];
+    bool suspicious;
+} dns_query_t;
+
 static const char *TAG = "appliance_v2";
 static esp_netif_t *ap_netif = NULL;
 static esp_netif_t *sta_netif = NULL;
@@ -87,6 +114,21 @@ static uint32_t event_count = 0;
 static uint32_t event_write_index = 0;
 static traffic_counters_t traffic = {0};
 static route_stat_t route_stats[ROUTE_TRACK_CAPACITY] = {0};
+static dns_query_t dns_queries[DNS_RECENT_CAPACITY] = {0};
+static uint32_t dns_query_count = 0;
+static uint32_t dns_write_index = 0;
+static uint32_t dns_next_id = 1;
+static uint64_t dns_total_queries = 0;
+static uint64_t suspicious_dns_count = 0;
+static bool dns_monitoring_enabled = false;
+static bool dns_first_observed = false;
+static char dns_last_domain[DNS_DOMAIN_LEN] = "";
+static char dns_last_client[DNS_CLIENT_LEN] = "";
+static char dns_last_query_type[DNS_QUERY_TYPE_LEN] = "";
+static volatile bool time_synchronized = false;
+static bool sntp_started = false;
+static char last_timestamp[TIMESTAMP_LEN] = "unsynced";
+static const char *TIMEZONE_LABEL = "America/Sao_Paulo";
 static bool upstream_configured = false;
 static bool upstream_connecting = false;
 static bool upstream_connected = false;
@@ -129,6 +171,31 @@ static void format_uptime_label(uint64_t ms, char *out, size_t out_len)
              (unsigned long long)secs);
 }
 
+static bool format_current_timestamp(char *out, size_t out_len)
+{
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    if (timeinfo.tm_year < (2023 - 1900)) {
+        strlcpy(out, "unsynced", out_len);
+        return false;
+    }
+    strftime(out, out_len, "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+    return true;
+}
+
+static void snapshot_time(char *timestamp, size_t timestamp_len, bool *synced)
+{
+    bool ok = time_synchronized && format_current_timestamp(timestamp, timestamp_len);
+    if (!ok) {
+        strlcpy(timestamp, "unsynced", timestamp_len);
+    }
+    if (synced != NULL) {
+        *synced = ok;
+    }
+}
+
 static void json_escape_string(const char *in, char *out, size_t out_len)
 {
     size_t pos = 0;
@@ -162,6 +229,10 @@ static void add_event(const char *level, const char *source, const char *fmt, ..
         }
     }
 
+    char timestamp[TIMESTAMP_LEN];
+    bool synced = false;
+    snapshot_time(timestamp, sizeof(timestamp), &synced);
+
     if (state_mutex != NULL) {
         xSemaphoreTake(state_mutex, portMAX_DELAY);
     }
@@ -170,6 +241,8 @@ static void add_event(const char *level, const char *source, const char *fmt, ..
     slot->id = event_next_id++;
     slot->uptime_ms = uptime_ms();
     format_uptime_label(slot->uptime_ms, slot->time_label, sizeof(slot->time_label));
+    strlcpy(slot->timestamp, timestamp, sizeof(slot->timestamp));
+    slot->time_synced = synced;
     strlcpy(slot->level, level, sizeof(slot->level));
     strlcpy(slot->source, source, sizeof(slot->source));
     strlcpy(slot->message, message, sizeof(slot->message));
@@ -329,6 +402,8 @@ static void increment_route_counter(const char *route)
         traffic.logs++;
     } else if (strcmp(route, "/api/events") == 0) {
         traffic.api_events++;
+    } else if (strcmp(route, "/api/dns") == 0 || strcmp(route, "/dns") == 0) {
+        traffic.api++;
     } else if (strcmp(route, "/traffic") == 0) {
         traffic.traffic++;
     } else if (strcmp(route, "/report") == 0) {
@@ -380,6 +455,224 @@ static void log_http_event(httpd_req_t *req, const char *route, const char *leve
     add_event(level, "http", "GET %s from %s ua=%s %s", route, ip, agent, note);
 }
 
+static void sntp_sync_callback(struct timeval *tv)
+{
+    (void)tv;
+    time_synchronized = true;
+    snapshot_time(last_timestamp, sizeof(last_timestamp), NULL);
+    add_event("INFO", "time", "SNTP synchronized: %s", last_timestamp);
+}
+
+static void start_sntp_sync(void)
+{
+    if (sntp_started) {
+        return;
+    }
+    setenv("TZ", "BRT3", 1);
+    tzset();
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_setservername(1, "time.google.com");
+    esp_sntp_set_time_sync_notification_cb(sntp_sync_callback);
+    esp_sntp_init();
+    sntp_started = true;
+    add_event("INFO", "time", "SNTP started: pool.ntp.org timezone=%s", TIMEZONE_LABEL);
+}
+
+static const char *dns_query_type_label(uint16_t qtype)
+{
+    switch (qtype) {
+    case 1:
+        return "A";
+    case 28:
+        return "AAAA";
+    default:
+        return "OTHER";
+    }
+}
+
+static bool is_suspicious_domain(const char *domain)
+{
+    return strcasecmp(domain, "malware.test") == 0 ||
+           strcasecmp(domain, "phishing.test") == 0 ||
+           strcasecmp(domain, "suspicious.test") == 0 ||
+           strcasecmp(domain, "bad.example") == 0;
+}
+
+static bool parse_dns_query(const uint8_t *packet, ssize_t len, char *domain, size_t domain_len, uint16_t *qtype)
+{
+    if (len < 17 || domain_len == 0) {
+        return false;
+    }
+    uint16_t qdcount = ((uint16_t)packet[4] << 8) | packet[5];
+    if (qdcount == 0) {
+        return false;
+    }
+
+    size_t pos = 12;
+    size_t out = 0;
+    while (pos < (size_t)len) {
+        uint8_t label_len = packet[pos++];
+        if (label_len == 0) {
+            break;
+        }
+        if ((label_len & 0xC0) != 0 || label_len > 63 || pos + label_len > (size_t)len) {
+            return false;
+        }
+        if (out > 0 && out + 1 < domain_len) {
+            domain[out++] = '.';
+        }
+        for (uint8_t i = 0; i < label_len && out + 1 < domain_len; i++) {
+            char c = (char)packet[pos + i];
+            domain[out++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        pos += label_len;
+    }
+    domain[out] = '\0';
+    if (domain[0] == '\0' || pos + 4 > (size_t)len) {
+        return false;
+    }
+    *qtype = ((uint16_t)packet[pos] << 8) | packet[pos + 1];
+    return true;
+}
+
+static void record_dns_query(const char *client, const char *domain, const char *query_type)
+{
+    char timestamp[TIMESTAMP_LEN];
+    char label[16];
+    bool synced = false;
+    bool suspicious = is_suspicious_domain(domain);
+    bool first_observed = false;
+    uint64_t total_after = 0;
+    uint64_t suspicious_after = 0;
+    uint64_t now_ms = uptime_ms();
+    snapshot_time(timestamp, sizeof(timestamp), &synced);
+    format_uptime_label(now_ms, label, sizeof(label));
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    if (!dns_first_observed) {
+        dns_first_observed = true;
+        first_observed = true;
+    }
+    dns_total_queries++;
+    total_after = dns_total_queries;
+    if (suspicious) {
+        suspicious_dns_count++;
+        suspicious_after = suspicious_dns_count;
+    }
+    strlcpy(dns_last_domain, domain, sizeof(dns_last_domain));
+    strlcpy(dns_last_client, client, sizeof(dns_last_client));
+    strlcpy(dns_last_query_type, query_type, sizeof(dns_last_query_type));
+
+    dns_query_t *slot = &dns_queries[dns_write_index];
+    slot->id = dns_next_id++;
+    slot->uptime_ms = now_ms;
+    strlcpy(slot->time_label, label, sizeof(slot->time_label));
+    strlcpy(slot->timestamp, timestamp, sizeof(slot->timestamp));
+    slot->time_synced = synced;
+    strlcpy(slot->client, client, sizeof(slot->client));
+    strlcpy(slot->domain, domain, sizeof(slot->domain));
+    strlcpy(slot->query_type, query_type, sizeof(slot->query_type));
+    slot->suspicious = suspicious;
+    dns_write_index = (dns_write_index + 1U) % DNS_RECENT_CAPACITY;
+    if (dns_query_count < DNS_RECENT_CAPACITY) {
+        dns_query_count++;
+    }
+    xSemaphoreGive(state_mutex);
+
+    if (first_observed) {
+        add_event("INFO", "dns", "First DNS query observed: %s from %s type=%s", domain, client, query_type);
+    }
+    if (suspicious) {
+        add_event("SECURITY", "dns", "Suspicious DNS domain=%s client=%s type=%s total=%llu suspicious=%llu",
+                  domain, client, query_type,
+                  (unsigned long long)total_after,
+                  (unsigned long long)suspicious_after);
+    }
+}
+
+static int forward_dns_once(const uint8_t *query, ssize_t query_len, uint8_t *response, size_t response_len, const char *server_ip)
+{
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        return -1;
+    }
+    struct timeval timeout = {.tv_sec = 1, .tv_usec = 200000};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in upstream = {0};
+    upstream.sin_family = AF_INET;
+    upstream.sin_port = htons(53);
+    inet_pton(AF_INET, server_ip, &upstream.sin_addr);
+
+    int sent = sendto(sock, query, query_len, 0, (struct sockaddr *)&upstream, sizeof(upstream));
+    if (sent < 0) {
+        close(sock);
+        return -1;
+    }
+    int received = recvfrom(sock, response, response_len, 0, NULL, NULL);
+    close(sock);
+    return received;
+}
+
+static void dns_proxy_task(void *arg)
+{
+    (void)arg;
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        add_event("ERROR", "dns", "DNS proxy socket creation failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in listen_addr = {0};
+    listen_addr.sin_family = AF_INET;
+    listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    listen_addr.sin_port = htons(DNS_PROXY_PORT);
+    if (bind(sock, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
+        add_event("ERROR", "dns", "DNS proxy bind failed on UDP port %d", DNS_PROXY_PORT);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    dns_monitoring_enabled = true;
+    add_event("INFO", "dns", "DNS monitor/proxy started on UDP port %d", DNS_PROXY_PORT);
+
+    while (true) {
+        uint8_t query[DNS_PACKET_MAX];
+        uint8_t response[DNS_PACKET_MAX];
+        struct sockaddr_in client_addr = {0};
+        socklen_t client_len = sizeof(client_addr);
+        ssize_t len = recvfrom(sock, query, sizeof(query), 0, (struct sockaddr *)&client_addr, &client_len);
+        if (len <= 0) {
+            continue;
+        }
+
+        char client_ip[DNS_CLIENT_LEN] = "n/d";
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+
+        char domain[DNS_DOMAIN_LEN] = "";
+        uint16_t qtype = 0;
+        if (parse_dns_query(query, len, domain, sizeof(domain), &qtype) && (qtype == 1 || qtype == 28)) {
+            record_dns_query(client_ip, domain, dns_query_type_label(qtype));
+        }
+
+        int resp_len = forward_dns_once(query, len, response, sizeof(response), "1.1.1.1");
+        if (resp_len <= 0) {
+            resp_len = forward_dns_once(query, len, response, sizeof(response), "8.8.8.8");
+        }
+        if (resp_len > 0) {
+            sendto(sock, response, resp_len, 0, (struct sockaddr *)&client_addr, client_len);
+        }
+    }
+}
+
+static void start_dns_proxy(void)
+{
+    xTaskCreatePinnedToCore(dns_proxy_task, "dnsProxy", 4096, NULL, 4, NULL, 0);
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
     (void)arg;
@@ -428,6 +721,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         snprintf(upstream_netmask, sizeof(upstream_netmask), IPSTR, IP2STR(&event->ip_info.netmask));
         add_event("INFO", "wifi", "STA got IP %s", upstream_ip);
         enable_napt_on_ap();
+        start_sntp_sync();
     }
 }
 
@@ -498,20 +792,20 @@ static esp_err_t root_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "</style></head><body>"
         "<header><h1>ESP-IDF Appliance v2</h1><div>Mini appliance demonstrável: AP+STA, NAPT, IDS didático e telemetria HTTP.</div>"
-        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/report\">Report</a><a href=\"/demo\">Demo</a><a href=\"/api\">API</a></nav></header>"
+        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/dns\">DNS</a><a href=\"/report\">Report</a><a href=\"/demo\">Demo</a><a href=\"/api\">API</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section>"
         "<section class=\"card\"><h2>Rotas mais acessadas</h2><table><thead><tr><th>Rota</th><th>Hits</th></tr></thead><tbody id=\"routes\"></tbody></table></section>"
-        "<section class=\"card\"><h2>Eventos recentes</h2><table><thead><tr><th>ID</th><th>Tempo</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></section></main>"
+        "<section class=\"card\"><h2>Eventos recentes</h2><table><thead><tr><th>ID</th><th>Horário</th><th>Uptime</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></section></main>"
         "<script>"
         "function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
         "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
         "function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }"
-        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
+        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_synced?x.timestamp:'unsynced')+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
         "async function load(){const s=await fetch('/api/status').then(r=>r.json());"
         "document.getElementById('cards').innerHTML=["
         "['AP',s.ap.ssid+' / '+s.ap.ip],['Upstream',s.upstream.connected?s.upstream.ip:(s.upstream.configured?'conectando':'n/d')],"
         "['NAT',s.nat.active?'ativo':(s.nat.attempted?'falhou':'inativo')],['Clientes',s.clients.count],"
-        "['Requests',s.traffic.total],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
+        "['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio',s.dns.last_domain||'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['404',s.traffic.not_found],['Sensitive',s.traffic.sensitive_path_hits],['Scan',s.traffic.suspicious_scan_count],['Heap',s.heap_free],['Última rota',s.traffic.last_route]"
         "].map(c=>card(c[0],c[1])).join('');"
         "document.getElementById('routes').innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');"
         "const e=await fetch('/api/events').then(r=>r.json());"
@@ -526,13 +820,14 @@ static esp_err_t status_handler(httpd_req_t *req)
         "ESP-IDF Appliance v2\n"
         "Dashboard: /\n"
         "JSON: /api/status\n"
-        "Eventos: /api/events\n");
+        "Eventos: /api/events\n"
+        "DNS: /dns e /api/dns\n");
 }
 
 static esp_err_t api_status_handler(httpd_req_t *req)
 {
     increment_route_counter("/api/status");
-    char *json = calloc(1, 8192);
+    char *json = calloc(1, 12288);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_FAIL;
@@ -543,6 +838,15 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     traffic_counters_t traffic_snapshot = traffic;
     route_stat_t route_snapshot[ROUTE_TRACK_CAPACITY];
     memcpy(route_snapshot, route_stats, sizeof(route_snapshot));
+    uint64_t dns_total_snapshot = dns_total_queries;
+    uint64_t suspicious_dns_snapshot = suspicious_dns_count;
+    bool dns_enabled_snapshot = dns_monitoring_enabled;
+    char dns_domain_snapshot[DNS_DOMAIN_LEN];
+    char dns_client_snapshot[DNS_CLIENT_LEN];
+    char dns_type_snapshot[DNS_QUERY_TYPE_LEN];
+    strlcpy(dns_domain_snapshot, dns_last_domain, sizeof(dns_domain_snapshot));
+    strlcpy(dns_client_snapshot, dns_last_client, sizeof(dns_client_snapshot));
+    strlcpy(dns_type_snapshot, dns_last_query_type, sizeof(dns_type_snapshot));
     uint32_t event_count_snapshot = event_count;
     bool upstream_configured_snapshot = upstream_configured;
     bool upstream_connecting_snapshot = upstream_connecting;
@@ -562,26 +866,43 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     char version_json[24];
     char ap_ssid_json[40];
     char last_route_json[LAST_ROUTE_LEN * 2];
+    char time_json[TIMESTAMP_LEN * 2];
+    char dns_domain_json[DNS_DOMAIN_LEN * 2];
+    char dns_client_json[DNS_CLIENT_LEN * 2];
+    char dns_type_json[DNS_QUERY_TYPE_LEN * 2];
+    char current_timestamp[TIMESTAMP_LEN];
+    bool current_time_synced = false;
+    snapshot_time(current_timestamp, sizeof(current_timestamp), &current_time_synced);
     json_escape_string(APPLIANCE_V2_PROJECT, project_json, sizeof(project_json));
     json_escape_string(APPLIANCE_V2_VERSION, version_json, sizeof(version_json));
     json_escape_string(APPLIANCE_V2_AP_SSID, ap_ssid_json, sizeof(ap_ssid_json));
     json_escape_string(traffic_snapshot.last_route, last_route_json, sizeof(last_route_json));
+    json_escape_string(current_timestamp, time_json, sizeof(time_json));
+    json_escape_string(dns_domain_snapshot, dns_domain_json, sizeof(dns_domain_json));
+    json_escape_string(dns_client_snapshot, dns_client_json, sizeof(dns_client_json));
+    json_escape_string(dns_type_snapshot, dns_type_json, sizeof(dns_type_json));
 
-    size_t used = snprintf(json, 8192,
+    size_t used = snprintf(json, 12288,
         "{"
         "\"project\":\"%s\","
         "\"version\":\"%s\","
         "\"uptime_ms\":%llu,"
+        "\"time\":{\"synced\":%s,\"timestamp\":\"%s\",\"uptime_ms\":%llu,\"timezone\":\"%s\"},"
         "\"heap_free\":%lu,"
         "\"heap_minimum_free\":%lu,"
         "\"ap\":{\"ssid\":\"%s\",\"ip\":\"%d.%d.%d.%d\",\"channel\":%d,\"max_clients\":%d},"
         "\"upstream\":{\"configured\":%s,\"connecting\":%s,\"connected\":%s,\"ip\":\"%s\",\"gateway\":\"%s\",\"netmask\":\"%s\",\"last_disconnect_reason\":%u},"
         "\"nat\":{\"compiled\":%s,\"attempted\":%s,\"active\":%s},"
         "\"clients\":{\"count\":%u},"
+        "\"dns\":{\"monitoring_enabled\":%s,\"total_queries\":%llu,\"suspicious_count\":%llu,\"last_domain\":\"%s\",\"last_client\":\"%s\",\"last_query_type\":\"%s\"},"
         "\"traffic\":{\"total\":%llu,\"root\":%llu,\"status\":%llu,\"api\":%llu,\"api_status\":%llu,\"logs\":%llu,\"api_events\":%llu,\"traffic\":%llu,\"report\":%llu,\"demo\":%llu,\"demo_scan\":%llu,\"demo_security\":%llu,\"demo_info\":%llu,\"favicon\":%llu,\"not_found\":%llu,\"sensitive_path_hits\":%llu,\"suspicious_scan_count\":%llu,\"demo_scan_count\":%llu,\"last_route\":\"%s\",\"top_routes\":[",
         project_json,
         version_json,
         (unsigned long long)uptime_ms(),
+        current_time_synced ? "true" : "false",
+        time_json,
+        (unsigned long long)uptime_ms(),
+        TIMEZONE_LABEL,
         (unsigned long)esp_get_free_heap_size(),
         (unsigned long)esp_get_minimum_free_heap_size(),
         ap_ssid_json,
@@ -603,6 +924,12 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         nat_attempted_snapshot ? "true" : "false",
         nat_active_snapshot ? "true" : "false",
         clients,
+        dns_enabled_snapshot ? "true" : "false",
+        (unsigned long long)dns_total_snapshot,
+        (unsigned long long)suspicious_dns_snapshot,
+        dns_domain_json,
+        dns_client_json,
+        dns_type_json,
         (unsigned long long)traffic_snapshot.total,
         (unsigned long long)traffic_snapshot.root,
         (unsigned long long)traffic_snapshot.status,
@@ -624,20 +951,20 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         last_route_json);
 
     bool first = true;
-    for (uint32_t i = 0; i < ROUTE_TRACK_CAPACITY && used < 7900; i++) {
+    for (uint32_t i = 0; i < ROUTE_TRACK_CAPACITY && used < 11800; i++) {
         if (route_snapshot[i].count == 0) {
             continue;
         }
         char route_json[LAST_ROUTE_LEN * 2];
         json_escape_string(route_snapshot[i].route, route_json, sizeof(route_json));
-        used += snprintf(json + used, 8192 - used,
+        used += snprintf(json + used, 12288 - used,
             "%s{\"route\":\"%s\",\"count\":%llu}",
             first ? "" : ",",
             route_json,
             (unsigned long long)route_snapshot[i].count);
         first = false;
     }
-    snprintf(json + used, 8192 - used,
+    snprintf(json + used, 12288 - used,
         "]},\"event_count\":%lu,"
         "\"limits\":{\"events_capacity\":%d,\"route_track_capacity\":%d},"
         "\"limitations\":[\"events_only_in_ram\",\"no_firewall_professional\",\"no_https_inspection\",\"nat_requires_sta_ip\"]}",
@@ -654,37 +981,121 @@ static esp_err_t api_status_handler(httpd_req_t *req)
 static esp_err_t api_events_handler(httpd_req_t *req)
 {
     increment_route_counter("/api/events");
-    char *json = calloc(1, 6144);
+    char *json = calloc(1, 8192);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
         return ESP_FAIL;
     }
 
     size_t used = 0;
-    used += snprintf(json + used, 6144 - used, "{\"events\":[");
+    used += snprintf(json + used, 8192 - used, "{\"events\":[");
 
     xSemaphoreTake(state_mutex, portMAX_DELAY);
     uint32_t available = event_count;
     uint32_t start = (event_write_index + EVENT_CAPACITY - available) % EVENT_CAPACITY;
-    for (uint32_t i = 0; i < available && used < 6000; i++) {
+    for (uint32_t i = 0; i < available && used < 8000; i++) {
         app_event_t *event = &events[(start + i) % EVENT_CAPACITY];
-        used += snprintf(json + used, 6144 - used,
-            "%s{\"id\":%lu,\"uptime_ms\":%llu,\"time_label\":\"%s\",\"level\":\"%s\",\"source\":\"%s\",\"message\":\"%s\"}",
+        used += snprintf(json + used, 8192 - used,
+            "%s{\"id\":%lu,\"uptime_ms\":%llu,\"time_label\":\"%s\",\"timestamp\":\"%s\",\"time_synced\":%s,\"level\":\"%s\",\"source\":\"%s\",\"message\":\"%s\"}",
             i == 0 ? "" : ",",
             (unsigned long)event->id,
             (unsigned long long)event->uptime_ms,
             event->time_label,
+            event->timestamp,
+            event->time_synced ? "true" : "false",
             event->level,
             event->source,
             event->message);
     }
     xSemaphoreGive(state_mutex);
 
-    snprintf(json + used, 6144 - used, "]}");
+    snprintf(json + used, 8192 - used, "]}");
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_sendstr(req, json);
     free(json);
     return ret;
+}
+
+static esp_err_t api_dns_handler(httpd_req_t *req)
+{
+    increment_route_counter("/api/dns");
+    char *json = calloc(1, 8192);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no memory");
+        return ESP_FAIL;
+    }
+
+    dns_query_t snapshot[DNS_RECENT_CAPACITY];
+    uint32_t count_snapshot;
+    uint32_t write_snapshot;
+    uint64_t total_snapshot;
+    uint64_t suspicious_snapshot;
+    bool enabled_snapshot;
+
+    xSemaphoreTake(state_mutex, portMAX_DELAY);
+    memcpy(snapshot, dns_queries, sizeof(snapshot));
+    count_snapshot = dns_query_count;
+    write_snapshot = dns_write_index;
+    total_snapshot = dns_total_queries;
+    suspicious_snapshot = suspicious_dns_count;
+    enabled_snapshot = dns_monitoring_enabled;
+    xSemaphoreGive(state_mutex);
+
+    size_t used = snprintf(json, 8192,
+        "{\"monitoring_enabled\":%s,\"total_queries\":%llu,\"suspicious_count\":%llu,\"recent_queries\":[",
+        enabled_snapshot ? "true" : "false",
+        (unsigned long long)total_snapshot,
+        (unsigned long long)suspicious_snapshot);
+
+    uint32_t start = (write_snapshot + DNS_RECENT_CAPACITY - count_snapshot) % DNS_RECENT_CAPACITY;
+    for (uint32_t i = 0; i < count_snapshot && used < 7800; i++) {
+        dns_query_t *q = &snapshot[(start + i) % DNS_RECENT_CAPACITY];
+        char client_json[DNS_CLIENT_LEN * 2];
+        char domain_json[DNS_DOMAIN_LEN * 2];
+        char type_json[DNS_QUERY_TYPE_LEN * 2];
+        char timestamp_json[TIMESTAMP_LEN * 2];
+        json_escape_string(q->client, client_json, sizeof(client_json));
+        json_escape_string(q->domain, domain_json, sizeof(domain_json));
+        json_escape_string(q->query_type, type_json, sizeof(type_json));
+        json_escape_string(q->timestamp, timestamp_json, sizeof(timestamp_json));
+        used += snprintf(json + used, 8192 - used,
+            "%s{\"id\":%lu,\"uptime_ms\":%llu,\"time_label\":\"%s\",\"timestamp\":\"%s\",\"time_synced\":%s,\"client_ip\":\"%s\",\"domain\":\"%s\",\"query_type\":\"%s\",\"suspicious\":%s}",
+            i == 0 ? "" : ",",
+            (unsigned long)q->id,
+            (unsigned long long)q->uptime_ms,
+            q->time_label,
+            timestamp_json,
+            q->time_synced ? "true" : "false",
+            client_json,
+            domain_json,
+            type_json,
+            q->suspicious ? "true" : "false");
+    }
+
+    snprintf(json + used, 8192 - used,
+        "],\"limitations\":[\"dns_queries_only\",\"no_https_content_inspection\",\"a_aaaa_queries_recorded\",\"best_effort_udp_proxy\",\"ram_only\"]}");
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_sendstr(req, json);
+    free(json);
+    return ret;
+}
+
+static esp_err_t dns_handler(httpd_req_t *req)
+{
+    increment_route_counter("/dns");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_sendstr_chunk(req, "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>DNS</title><style>");
+    httpd_resp_sendstr_chunk(req, html_style);
+    httpd_resp_sendstr_chunk(req,
+        "</style></head><body><header><h1>DNS</h1><div>Monitor didático de consultas DNS dos clientes do AP.</div>"
+        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/report\">Report</a><a href=\"/api/dns\">JSON</a></nav></header>"
+        "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Consultas recentes</h2><table><thead><tr><th>Horário</th><th>Uptime</th><th>Cliente</th><th>Domínio</th><th>Tipo</th><th>Status</th></tr></thead><tbody id=\"queries\"></tbody></table></section>"
+        "<section class=\"card\"><p>Este monitor mostra consultas DNS. HTTPS continua criptografado e o conteúdo das páginas não é lido.</p></section></main>"
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
+        "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
+        "function row(x){return '<tr><td>'+escapeHtml(x.time_synced?x.timestamp:'unsynced')+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.client_ip)+'</td><td><code>'+escapeHtml(x.domain)+'</code></td><td>'+escapeHtml(x.query_type)+'</td><td>'+(x.suspicious?'SECURITY':'ok')+'</td></tr>'; }"
+        "async function load(){const d=await fetch('/api/dns').then(r=>r.json());const recent=d.recent_queries||[];const last=recent.length?recent[recent.length-1]:{};cards.innerHTML=[['DNS queries',d.total_queries],['DNS suspeito',d.suspicious_count],['Último domínio',last.domain||'n/d'],['Último cliente',last.client_ip||'n/d']].map(c=>card(c[0],c[1])).join('');queries.innerHTML=recent.map(row).join('');}load();setInterval(load,5000);</script></body></html>");
+    return httpd_resp_sendstr_chunk(req, NULL);
 }
 
 static esp_err_t logs_handler(httpd_req_t *req)
@@ -697,9 +1108,9 @@ static esp_err_t logs_handler(httpd_req_t *req)
         "</style></head><body><header><h1>Logs</h1><div>Eventos recentes mantidos em RAM.</div>"
         "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/report\">Report</a><a href=\"/api/events\">JSON</a></nav></header>"
         "<main><section class=\"card\"><p>Eventos são filtrados para evitar ruído de polling; requests normais aparecem em /traffic.</p></section>"
-        "<table><thead><tr><th>ID</th><th>Uptime</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></main>"
+        "<table><thead><tr><th>ID</th><th>Horário</th><th>Uptime</th><th>Nível</th><th>Origem</th><th>Mensagem</th></tr></thead><tbody id=\"events\"></tbody></table></main>"
         "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
-        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
+        "function eventRow(x){return '<tr><td>'+Number(x.id||0)+'</td><td>'+escapeHtml(x.time_synced?x.timestamp:'unsynced')+'</td><td>'+escapeHtml(x.time_label)+'</td><td>'+escapeHtml(x.level)+'</td><td>'+escapeHtml(x.source)+'</td><td>'+escapeHtml(x.message)+'</td></tr>'; }"
         "fetch('/api/events').then(r=>r.json()).then(j=>events.innerHTML=(j.events||[]).map(eventRow).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
@@ -714,7 +1125,7 @@ static esp_err_t traffic_handler(httpd_req_t *req)
         "</style></head><body><header><h1>Traffic</h1><div>Contadores HTTP e sinais simples de varredura.</div>"
         "<nav><a href=\"/\">Dashboard</a><a href=\"/logs\">Logs</a><a href=\"/demo/scan\">Demo scan</a><a href=\"/api/status\">JSON</a></nav></header>"
         "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Top routes</h2><table><thead><tr><th>Rota</th><th>Hits</th></tr></thead><tbody id=\"routes\"></tbody></table></section></main>"
-        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total requests',s.traffic.total],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>card(c[0],c[1])).join('');routes.innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');}load();setInterval(load,5000);</script></body></html>");
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }function routeRow(x){return '<tr><td><code>'+escapeHtml(x.route)+'</code></td><td>'+Number(x.count||0)+'</td></tr>'; }async function load(){const s=await fetch('/api/status').then(r=>r.json());cards.innerHTML=[['Total requests',s.traffic.total],['DNS queries',s.dns.total_queries],['Último domínio',s.dns.last_domain||'n/d'],['Último cliente DNS',s.dns.last_client||'n/d'],['DNS suspeito',s.dns.suspicious_count],['404',s.traffic.not_found],['Sensíveis',s.traffic.sensitive_path_hits],['Scan suspeito',s.traffic.suspicious_scan_count],['Demo scan',s.traffic.demo_scan_count],['Última rota',s.traffic.last_route]].map(c=>card(c[0],c[1])).join('');routes.innerHTML=(s.traffic.top_routes||[]).map(routeRow).join('');}load();setInterval(load,5000);</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -726,9 +1137,13 @@ static esp_err_t report_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, html_style);
     httpd_resp_sendstr_chunk(req,
         "</style></head><body><header><h1>Relatório da PoC</h1><div>Resumo operacional para demonstração em bancada.</div>"
-        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/api/status\">JSON</a></nav></header>"
-        "<main><section class=\"grid\" id=\"cards\"></section><section class=\"card\"><h2>Escopo validado</h2><table><tr><td>AP+STA</td><td>AP fixo em 192.168.4.1 e STA opcional.</td></tr><tr><td>NAPT</td><td>Habilitado somente após IP válido no STA.</td></tr><tr><td>IDS didático</td><td>Contadores para rotas sensíveis e padrões simples de scan HTTP.</td></tr><tr><td>Limitação</td><td>Não é firewall profissional e não inspeciona HTTPS.</td></tr></table></section></main>"
-        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Heap livre',s.heap_free],['Requests',s.traffic.total]].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
+        "<nav><a href=\"/\">Dashboard</a><a href=\"/traffic\">Traffic</a><a href=\"/logs\">Logs</a><a href=\"/dns\">DNS</a><a href=\"/api/status\">JSON</a></nav></header>"
+        "<main><section class=\"grid\" id=\"cards\"></section>"
+        "<section class=\"card\"><h2>Escopo validado</h2><table><tr><td>AP+STA</td><td>AP fixo em 192.168.4.1 e STA opcional.</td></tr><tr><td>NAPT</td><td>Habilitado somente após IP válido no STA.</td></tr><tr><td>IDS didático</td><td>Contadores HTTP e DNS em RAM para demonstração.</td></tr><tr><td>Limitação</td><td>Não é firewall profissional e não inspeciona HTTPS.</td></tr></table></section>"
+        "<section class=\"card\"><h2>DNS/Tráfego observado</h2><table><tr><td>Monitor DNS</td><td>Registra consultas de domínio feitas por clientes do AP via proxy DNS local.</td></tr><tr><td>Privacidade</td><td>HTTPS continua criptografado; o sistema não lê conteúdo das páginas.</td></tr><tr><td>Escopo</td><td>Detecção didática por domínios de teste suspeitos, sem bloqueio nesta sprint.</td></tr></table></section></main>"
+        "<script>function escapeHtml(v){return String(v==null?'':v).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;';});}"
+        "function card(label,value){return '<div class=\"card\"><div class=\"label\">'+escapeHtml(label)+'</div><div class=\"value\">'+escapeHtml(value)+'</div></div>'; }"
+        "fetch('/api/status').then(r=>r.json()).then(s=>cards.innerHTML=[['Projeto',s.project],['Versão',s.version],['NAT',s.nat.active?'ativo':'inativo'],['Upstream',s.upstream.connected?s.upstream.ip:'n/d'],['Horário',s.time.synced?s.time.timestamp:'unsynced'],['Heap livre',s.heap_free],['Requests',s.traffic.total],['DNS queries',s.dns.total_queries],['DNS suspeito',s.dns.suspicious_count],['Último domínio',s.dns.last_domain||'n/d']].map(c=>card(c[0],c[1])).join(''));</script></body></html>");
     return httpd_resp_sendstr_chunk(req, NULL);
 }
 
@@ -741,7 +1156,9 @@ static esp_err_t api_index_handler(httpd_req_t *req)
         "{\"apis\":["
         "{\"path\":\"/api/status\",\"type\":\"status\"},"
         "{\"path\":\"/api/events\",\"type\":\"events\"},"
+        "{\"path\":\"/api/dns\",\"type\":\"dns\"},"
         "{\"path\":\"/traffic\",\"type\":\"html\"},"
+        "{\"path\":\"/dns\",\"type\":\"html\"},"
         "{\"path\":\"/logs\",\"type\":\"html\"},"
         "{\"path\":\"/report\",\"type\":\"html\"}"
         "],\"note\":\"/api e tratado tambem como rota sensivel para fins didaticos\"}");
@@ -810,7 +1227,7 @@ static void start_http_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 28;
 
     ESP_ERROR_CHECK(httpd_start(&http_server, &config));
 
@@ -821,6 +1238,8 @@ static void start_http_server(void)
         {.uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = NULL},
         {.uri = "/logs", .method = HTTP_GET, .handler = logs_handler, .user_ctx = NULL},
         {.uri = "/api/events", .method = HTTP_GET, .handler = api_events_handler, .user_ctx = NULL},
+        {.uri = "/api/dns", .method = HTTP_GET, .handler = api_dns_handler, .user_ctx = NULL},
+        {.uri = "/dns", .method = HTTP_GET, .handler = dns_handler, .user_ctx = NULL},
         {.uri = "/traffic", .method = HTTP_GET, .handler = traffic_handler, .user_ctx = NULL},
         {.uri = "/report", .method = HTTP_GET, .handler = report_handler, .user_ctx = NULL},
         {.uri = "/demo", .method = HTTP_GET, .handler = demo_handler, .user_ctx = NULL},
@@ -859,6 +1278,7 @@ void app_main(void)
     add_event("INFO", "build", "IP_NAPT=%d IP_FORWARD=%d", IP_NAPT, IP_FORWARD);
 
     start_wifi_ap_sta();
+    start_dns_proxy();
     start_http_server();
 
     while (true) {
