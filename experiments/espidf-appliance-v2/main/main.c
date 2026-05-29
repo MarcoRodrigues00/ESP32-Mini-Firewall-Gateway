@@ -93,8 +93,14 @@ typedef struct {
     bool nat_attempted;
     bool nat_active;
     uint16_t client_count;
+    uint32_t observed_client_count;
     uint8_t highest_risk_score;
+    uint64_t dns_total_queries;
+    uint64_t suspicious_dns_count;
+    char last_dns_domain[DISPLAY_DOMAIN_LABEL_LEN];
+    char last_dns_client[DNS_CLIENT_LEN];
     char last_suspicious_domain[DISPLAY_DOMAIN_LABEL_LEN];
+    char last_suspicious_client[DNS_CLIENT_LEN];
     char clock_label[8];
 } display_snapshot_t;
 
@@ -218,6 +224,7 @@ static uint64_t display_last_update_ms = 0;
 static uint64_t display_last_suspicious_ms = 0;
 static uint64_t display_last_attack_ms = 0;
 static char display_last_suspicious_domain[DISPLAY_DOMAIN_LABEL_LEN] = "";
+static char display_last_suspicious_client[DNS_CLIENT_LEN] = "";
 static display_state_t display_current_state = DISPLAY_STATE_NORMAL;
 #if APPLIANCE_V2_ENABLE_DISPLAY
 static spi_device_handle_t display_spi = NULL;
@@ -275,11 +282,14 @@ static void display_format_clock(char *out, size_t out_len)
     strftime(out, out_len, "%H:%M", &timeinfo);
 }
 
-static void display_note_suspicious_dns(const char *domain, uint64_t now_ms)
+static void display_note_suspicious_dns(const char *domain, const char *client, uint64_t now_ms)
 {
     display_last_suspicious_ms = now_ms;
     if (domain != NULL && domain[0] != '\0') {
         strlcpy(display_last_suspicious_domain, domain, sizeof(display_last_suspicious_domain));
+    }
+    if (client != NULL && client[0] != '\0') {
+        strlcpy(display_last_suspicious_client, client, sizeof(display_last_suspicious_client));
     }
 }
 
@@ -298,7 +308,10 @@ static void compute_display_state(display_snapshot_t *out)
     out->upstream_box = DISPLAY_BOX_OFF;
     out->nat_box = DISPLAY_BOX_OFF;
     out->ids_box = DISPLAY_BOX_OK;
+    strlcpy(out->last_dns_domain, "n/d", sizeof(out->last_dns_domain));
+    strlcpy(out->last_dns_client, "n/d", sizeof(out->last_dns_client));
     strlcpy(out->last_suspicious_domain, "n/d", sizeof(out->last_suspicious_domain));
+    strlcpy(out->last_suspicious_client, "n/d", sizeof(out->last_suspicious_client));
     display_format_clock(out->clock_label, sizeof(out->clock_label));
 
     uint64_t now_ms = uptime_ms();
@@ -309,17 +322,24 @@ static void compute_display_state(display_snapshot_t *out)
     char highest_client[DNS_CLIENT_LEN];
     char last_domain[DNS_DOMAIN_LEN];
     ids_summary_locked(&active_clients, &out->highest_risk_score, highest_client, sizeof(highest_client), last_domain, sizeof(last_domain));
-    (void)active_clients;
+    out->observed_client_count = active_clients;
     out->upstream_configured = upstream_configured;
     out->upstream_connecting = upstream_connecting;
     out->upstream_connected = upstream_connected;
     out->nat_attempted = nat_attempted;
     out->nat_active = nat_active;
+    out->dns_total_queries = dns_total_queries;
+    out->suspicious_dns_count = suspicious_dns_count;
+    strlcpy(out->last_dns_domain, dns_last_domain[0] != '\0' ? dns_last_domain : "n/d", sizeof(out->last_dns_domain));
+    strlcpy(out->last_dns_client, dns_last_client[0] != '\0' ? dns_last_client : "n/d", sizeof(out->last_dns_client));
     uint64_t suspicious_age = display_last_suspicious_ms == 0 ? UINT64_MAX : now_ms - display_last_suspicious_ms;
     uint64_t attack_age = display_last_attack_ms == 0 ? UINT64_MAX : now_ms - display_last_attack_ms;
     strlcpy(out->last_suspicious_domain,
             display_last_suspicious_domain[0] != '\0' ? display_last_suspicious_domain : "n/d",
             sizeof(out->last_suspicious_domain));
+    strlcpy(out->last_suspicious_client,
+            display_last_suspicious_client[0] != '\0' ? display_last_suspicious_client : "n/d",
+            sizeof(out->last_suspicious_client));
     xSemaphoreGive(state_mutex);
 
     bool attack_recent = attack_age <= DISPLAY_ATTACK_HOLD_MS;
@@ -372,6 +392,7 @@ static void compute_display_state(display_snapshot_t *out)
 #define DISPLAY_COLOR_RED 0xF800
 #define DISPLAY_COLOR_ORANGE 0xFC00
 #define DISPLAY_COLOR_BLUE 0x001F
+#define DISPLAY_COLOR_CYAN 0x07FF
 
 static uint16_t display_swap_color(uint16_t color)
 {
@@ -533,14 +554,80 @@ static void display_draw_text(int x, int y, const char *text, uint16_t color, in
     }
 }
 
-static void display_draw_pixel_icon(int x, int y, const uint8_t rows[16], uint16_t color, int scale)
+static void display_draw_fit_text(int x, int y, const char *prefix, const char *value, uint16_t prefix_color, uint16_t value_color, uint8_t max_value_chars)
+{
+    char clipped[DISPLAY_DOMAIN_LABEL_LEN];
+    size_t out = 0;
+    if (value == NULL || value[0] == '\0') {
+        value = "n/d";
+    }
+    while (value[out] != '\0' && out + 1 < sizeof(clipped) && out < max_value_chars) {
+        clipped[out] = value[out];
+        out++;
+    }
+    if (value[out] != '\0' && max_value_chars >= 2 && out >= 2) {
+        clipped[out - 2] = '.';
+        clipped[out - 1] = '.';
+    }
+    clipped[out] = '\0';
+
+    display_draw_text(x, y, prefix, prefix_color, 1);
+    display_draw_text(x + (int)strlen(prefix) * 6, y, clipped, value_color, 1);
+}
+
+static const char *display_panel_state_label(display_state_t state)
+{
+    if (state == DISPLAY_STATE_ATTACK) {
+        return "ATTACK";
+    }
+    if (state == DISPLAY_STATE_SUSPICIOUS_DNS) {
+        return "DNS SUS";
+    }
+    return "NORMAL";
+}
+
+static uint16_t display_state_color(display_state_t state)
+{
+    if (state == DISPLAY_STATE_ATTACK) {
+        return DISPLAY_COLOR_RED;
+    }
+    if (state == DISPLAY_STATE_SUSPICIOUS_DNS) {
+        return DISPLAY_COLOR_YELLOW;
+    }
+    return DISPLAY_COLOR_GREEN;
+}
+
+static void display_draw_micro_bitmap(int x, int y, const uint16_t rows[16], uint16_t color)
 {
     for (uint8_t row = 0; row < 16; row++) {
-        for (uint8_t col = 0; col < 8; col++) {
-            if (rows[row] & (1U << (7U - col))) {
-                display_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+        uint16_t bits = rows[row];
+        for (uint8_t col = 0; col < 16; col++, bits <<= 1) {
+            if (bits & 0x8000U) {
+                display_fill_rect(x + col * 2, y + row * 2, 2, 2, color);
             }
         }
+    }
+}
+
+static void display_draw_state_icon(int x, int y, display_state_t state)
+{
+    static const uint16_t normal[] = {0x0000,0x07E0,0x1FF8,0x3FFC,0x3FFC,0x7FFE,0x7FFE,0x7FFE,0x3FFC,0x3FFC,0x1FF8,0x0FF0,0x07E0,0x03C0,0x0180,0x0000};
+    static const uint16_t dns[] = {0x0000,0x07E0,0x1FF8,0x399C,0x718E,0x700E,0x799E,0x3FFC,0x1E78,0x0E70,0x0BD0,0x0A50,0x05A0,0x0000,0x0000,0x0000};
+    static const uint16_t attack[] = {0xC003,0x6006,0x300C,0x1FF8,0x399C,0x718E,0x700E,0x7BDE,0x3FFC,0x1E78,0x1FF8,0x0BD0,0x0660,0x0000,0x0000,0x0000};
+
+    if (state == DISPLAY_STATE_ATTACK) {
+        display_draw_micro_bitmap(x, y, attack, DISPLAY_COLOR_RED);
+        display_fill_rect(x + 4, y + 20, 4, 4, DISPLAY_COLOR_ORANGE);
+        display_fill_rect(x + 24, y + 20, 4, 4, DISPLAY_COLOR_ORANGE);
+        display_fill_rect(x + 12, y + 28, 8, 4, DISPLAY_COLOR_ORANGE);
+    } else if (state == DISPLAY_STATE_SUSPICIOUS_DNS) {
+        display_draw_micro_bitmap(x, y, dns, DISPLAY_COLOR_YELLOW);
+        display_fill_rect(x + 10, y + 28, 12, 4, DISPLAY_COLOR_RED);
+    } else {
+        display_draw_micro_bitmap(x, y, normal, DISPLAY_COLOR_GREEN);
+        display_fill_rect(x + 10, y + 16, 4, 4, DISPLAY_COLOR_CYAN);
+        display_fill_rect(x + 14, y + 20, 4, 4, DISPLAY_COLOR_CYAN);
+        display_fill_rect(x + 18, y + 14, 4, 10, DISPLAY_COLOR_CYAN);
     }
 }
 
@@ -568,46 +655,26 @@ static void display_draw_status_boxes(const display_snapshot_t *state)
     display_draw_text(186, APPLIANCE_V2_DISPLAY_HEIGHT - 42, "IDS", DISPLAY_COLOR_WHITE, 1);
 }
 
-static void display_draw_normal(const display_snapshot_t *state)
+static void display_draw_dashboard(const display_snapshot_t *state)
 {
-    static const uint8_t shield[16] = {0x3C,0x7E,0xFF,0xDB,0xDB,0xDB,0xDB,0xC3,0xC3,0x66,0x66,0x3C,0x3C,0x18,0x18,0x00};
-    display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
-    display_draw_pixel_icon(32, 34, shield, DISPLAY_COLOR_GREEN, 7);
-    display_draw_text(118, 46, "NORMAL", DISPLAY_COLOR_GREEN, 2);
-    display_draw_text(118, 76, state->clock_label, DISPLAY_COLOR_WHITE, 2);
-    char line[24];
-    snprintf(line, sizeof(line), "CL:%u", state->client_count);
-    display_draw_text(118, 106, line, DISPLAY_COLOR_WHITE, 2);
-    snprintf(line, sizeof(line), "RISK:%u", state->highest_risk_score);
-    display_draw_text(118, 136, line, DISPLAY_COLOR_WHITE, 1);
-    display_draw_status_boxes(state);
-}
+    char line[32];
+    uint16_t state_color = display_state_color(state->state);
 
-static void display_draw_suspicious_dns(const display_snapshot_t *state)
-{
-    static const uint8_t skull[16] = {0x3C,0x7E,0xDB,0xFF,0xA5,0xFF,0xBD,0x7E,0x3C,0x24,0x3C,0x24,0x24,0x00,0x00,0x00};
     display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
-    display_draw_pixel_icon(28, 24, skull, DISPLAY_COLOR_RED, 8);
-    display_draw_text(112, 38, "DNS SUS", DISPLAY_COLOR_YELLOW, 2);
-    display_draw_text(112, 70, state->clock_label, DISPLAY_COLOR_WHITE, 2);
-    char domain[DISPLAY_DOMAIN_LABEL_LEN];
-    strlcpy(domain, state->last_suspicious_domain, sizeof(domain));
-    display_draw_text(16, 164, domain, DISPLAY_COLOR_RED, 1);
-    display_draw_status_boxes(state);
-}
+    display_draw_state_icon(10, 10, state->state);
+    display_draw_text(50, 12, display_panel_state_label(state->state), state_color, 2);
+    display_draw_text(174, 14, state->clock_label, DISPLAY_COLOR_WHITE, 1);
 
-static void display_draw_attack(const display_snapshot_t *state)
-{
-    static const uint8_t alert[16] = {0x18,0x18,0x3C,0x3C,0x7E,0x7E,0xDB,0xDB,0xFF,0xFF,0x18,0x18,0x00,0x18,0x18,0x00};
-    display_fill_rect(0, 0, APPLIANCE_V2_DISPLAY_WIDTH, APPLIANCE_V2_DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
-    display_draw_pixel_icon(32, 18, alert, DISPLAY_COLOR_RED, 8);
-    display_draw_text(116, 42, "ATTACK", DISPLAY_COLOR_RED, 2);
-    display_draw_text(116, 76, state->clock_label, DISPLAY_COLOR_WHITE, 2);
-    char line[24];
-    snprintf(line, sizeof(line), "RISK:%u", state->highest_risk_score);
-    display_draw_text(116, 110, line, DISPLAY_COLOR_ORANGE, 2);
-    snprintf(line, sizeof(line), "CL:%u", state->client_count);
-    display_draw_text(116, 142, line, DISPLAY_COLOR_WHITE, 1);
+    snprintf(line, sizeof(line), "CLI:%u OBS:%lu", state->client_count, (unsigned long)state->observed_client_count);
+    display_draw_text(12, 48, line, DISPLAY_COLOR_CYAN, 1);
+    snprintf(line, sizeof(line), "RISK:%u DNS:%llu", state->highest_risk_score, (unsigned long long)state->dns_total_queries);
+    display_draw_text(12, 68, line, state_color, 1);
+    display_draw_fit_text(12, 90, "DNS:", state->last_dns_domain, DISPLAY_COLOR_CYAN, DISPLAY_COLOR_WHITE, 29);
+    display_draw_fit_text(12, 110, "CLIENTE:", state->last_dns_client, DISPLAY_COLOR_CYAN, DISPLAY_COLOR_WHITE, 23);
+    display_draw_fit_text(12, 132, "SUS:", state->last_suspicious_domain, DISPLAY_COLOR_YELLOW, DISPLAY_COLOR_RED, 29);
+    display_draw_fit_text(12, 152, "SRC:", state->last_suspicious_client, DISPLAY_COLOR_YELLOW, DISPLAY_COLOR_ORANGE, 29);
+    snprintf(line, sizeof(line), "SUS DNS:%llu", (unsigned long long)state->suspicious_dns_count);
+    display_draw_text(12, 174, line, DISPLAY_COLOR_GRAY, 1);
     display_draw_status_boxes(state);
 }
 
@@ -618,20 +685,20 @@ static bool display_snapshot_changed(const display_snapshot_t *a, const display_
            a->nat_box != b->nat_box ||
            a->ids_box != b->ids_box ||
            a->client_count != b->client_count ||
+           a->observed_client_count != b->observed_client_count ||
            a->highest_risk_score != b->highest_risk_score ||
+           a->dns_total_queries != b->dns_total_queries ||
+           a->suspicious_dns_count != b->suspicious_dns_count ||
            strcmp(a->clock_label, b->clock_label) != 0 ||
-           strcmp(a->last_suspicious_domain, b->last_suspicious_domain) != 0;
+           strcmp(a->last_dns_domain, b->last_dns_domain) != 0 ||
+           strcmp(a->last_dns_client, b->last_dns_client) != 0 ||
+           strcmp(a->last_suspicious_domain, b->last_suspicious_domain) != 0 ||
+           strcmp(a->last_suspicious_client, b->last_suspicious_client) != 0;
 }
 
 static void display_draw_snapshot(const display_snapshot_t *state)
 {
-    if (state->state == DISPLAY_STATE_ATTACK) {
-        display_draw_attack(state);
-    } else if (state->state == DISPLAY_STATE_SUSPICIOUS_DNS) {
-        display_draw_suspicious_dns(state);
-    } else {
-        display_draw_normal(state);
-    }
+    display_draw_dashboard(state);
 }
 
 static bool display_pins_configured(void)
@@ -1381,7 +1448,7 @@ static void record_dns_query(const char *client, const char *domain, const char 
     }
     ids_record_dns_query_locked(client, domain, suspicious, now_ms, &burst_detected);
     if (suspicious) {
-        display_note_suspicious_dns(domain, now_ms);
+        display_note_suspicious_dns(domain, client, now_ms);
     }
     if (burst_detected) {
         display_note_attack(now_ms);
@@ -1717,6 +1784,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     char dns_type_json[DNS_QUERY_TYPE_LEN * 2];
     char ids_highest_client_json[DNS_CLIENT_LEN * 2];
     char ids_last_domain_json[DNS_DOMAIN_LEN * 2];
+    char display_suspicious_domain_json[DISPLAY_DOMAIN_LABEL_LEN * 2];
     char current_timestamp[TIMESTAMP_LEN];
     bool current_time_synced = false;
     snapshot_time(current_timestamp, sizeof(current_timestamp), &current_time_synced);
@@ -1730,6 +1798,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     json_escape_string(dns_type_snapshot, dns_type_json, sizeof(dns_type_json));
     json_escape_string(ids_highest_client, ids_highest_client_json, sizeof(ids_highest_client_json));
     json_escape_string(ids_last_domain, ids_last_domain_json, sizeof(ids_last_domain_json));
+    json_escape_string(display_snapshot.last_suspicious_domain, display_suspicious_domain_json, sizeof(display_suspicious_domain_json));
 
     size_t used = snprintf(json, 12288,
         "{"
@@ -1833,7 +1902,7 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     snprintf(json + used, 12288 - used,
         "]},\"event_count\":%lu,"
         "\"limits\":{\"events_capacity\":%d,\"route_track_capacity\":%d},"
-        "\"display\":{\"enabled\":%s,\"available\":%s,\"state\":\"%s\",\"last_update_ms\":%llu},"
+        "\"display\":{\"enabled\":%s,\"available\":%s,\"state\":\"%s\",\"last_update_ms\":%llu,\"last_domain\":\"%s\",\"last_client\":\"%s\",\"last_suspicious_domain\":\"%s\"},"
         "\"limitations\":[\"events_only_in_ram\",\"no_firewall_professional\",\"no_https_inspection\",\"nat_requires_sta_ip\"]}",
         (unsigned long)event_count_snapshot,
         EVENT_CAPACITY,
@@ -1841,7 +1910,10 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         APPLIANCE_V2_ENABLE_DISPLAY ? "true" : "false",
         display_available ? "true" : "false",
         display_state_name(display_snapshot.state),
-        (unsigned long long)display_last_update_ms);
+        (unsigned long long)display_last_update_ms,
+        dns_domain_json,
+        dns_client_json,
+        display_suspicious_domain_json);
 
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_sendstr(req, json);
