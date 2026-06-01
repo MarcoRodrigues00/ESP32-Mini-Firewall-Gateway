@@ -1,269 +1,228 @@
-# ESP32 Mini Firewall Gateway
+# ESP32 Mini Firewall Gateway / Monitor Ciberfísico
 
-Projeto academico da disciplina Performance de Sistemas Ciberfisicos, implementado em ESP32 fisico com PlatformIO, framework Arduino e servidor web embarcado com `WebServer.h` sincrono.
+Projeto acadêmico da disciplina **Performance de Sistemas Ciberfísicos**, implementado em
+ESP32 físico. O sistema funciona como gateway/ponto de acesso (AP) Wi-Fi com dashboard web
+embarcado, monitor de DNS, NAT real, camada didática de IDS por metadados, métricas de
+performance e coleta de evidências de bancada.
 
-## Objetivo academico
+> **Natureza didática.** Este é um sistema de laboratório/educacional. Não é um firewall
+> profissional de produção e não substitui pfSense, OPNsense, Mikrotik, Fortinet, IDS/IPS,
+> WAF, SIEM ou roteador comercial. Não inspeciona tráfego HTTPS e não promete VPN nem
+> segurança corporativa real.
 
-Construir uma base demonstravel para um monitor ciberfisico com foco em performance, seguranca de rede didatica, dashboard local e coleta de evidencias para apresentacao. O sistema e de laboratorio: nao substitui firewall profissional, roteador real, IDS/IPS, WAF, SIEM, pfSense, OPNsense, Mikrotik ou Fortinet.
+---
 
-## Estado atual
+## Resumo
 
-A base atual compila para `esp32dev` e inclui:
+O protótipo demonstra, em hardware real, conceitos de sistema ciberfísico aplicados a um
+mini appliance de rede: um ESP32 atua como AP local, encaminha tráfego para uma rede
+upstream via NAT/NAPT, observa as consultas DNS dos clientes, calcula um score de risco
+heurístico por cliente e expõe tudo em um painel web local sem dependência de CDN. Toda a
+operação é instrumentada com métricas e logs para fins de apresentação acadêmica.
 
-- Wi-Fi em modo AP com SSID `ESP32-Firewall-Lab`;
-- servidor web embarcado na porta 80;
-- dashboard principal em `/` com abas obrigatorias;
-- API de status em `/api/status`;
-- pagina de evidencias em `/evidencias` com visual de relatorio academico;
-- sistema de eventos em memoria com buffer circular;
-- API de eventos em `/api/events`;
-- pagina de eventos em `/logs` e alias `/eventos`;
-- rotas demo controladas para gerar eventos de apresentacao;
-- firewall didatico sobre acessos HTTP ao painel;
-- deteccao didatica de flood por janela de requisicoes;
-- leitura do INA219 para tensao, corrente e potencia;
-- alertas didaticos de tensao baixa, corrente alta e potencia alta;
-- tasks FreeRTOS para web server, metricas e heartbeat;
-- metricas iniciais de uptime, heap, flash, sketch, Wi-Fi AP, energia e tempos de funcoes.
+## Objetivo acadêmico
 
-Ainda estao planejados para fases posteriores: sensores adicionais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia mais completo. O firewall atual e didatico e limitado aos acessos HTTP ao painel.
+Construir uma base demonstrável e defensável de um monitor ciberfísico, com foco em
+performance, telemetria de rede didática, dashboard local e geração de evidências
+reproduzíveis para a defesa do TDE. O escopo prioriza honestidade técnica: cada limitação é
+documentada e nenhum recurso é apresentado como mais robusto do que realmente é.
 
-## Componentes planejados
+## O que o sistema faz
 
-- ESP32 com display, se o driver for confirmado;
-- INA219 para corrente, tensao e potencia;
-- DHT22/AM2302 para temperatura e umidade;
-- MQ-2 para gas/fumaca;
-- rele 5V;
-- ventoinha 5V com acionamento adequado, nunca ligada direto no GPIO;
-- buzzer apenas como apoio, nao como atuador principal do TDE;
-- botoes fisicos;
-- fonte 5V externa quando necessario, GND comum, protoboard, jumpers e caixa fisica.
+- **AP Wi-Fi local** com IP fixo `192.168.4.1` e DHCP para clientes na rede `192.168.4.x`.
+- **STA upstream opcional**, com reconexão por backoff simples.
+- **NAT/NAPT real** habilitado somente após o STA obter IP (`IP_EVENT_STA_GOT_IP`),
+  permitindo que clientes do AP naveguem pela rede upstream.
+- **Monitor/proxy DNS didático** em UDP:53 — o AP entrega `192.168.4.1` como DNS via DHCP e
+  encaminha consultas para upstream (`1.1.1.1` com fallback `8.8.8.8`), observando domínios,
+  cliente de origem e tipo de consulta (A/AAAA).
+- **Camada de IDS por metadados (v0.3)**: clientes observados, contagem de consultas DNS,
+  domínios únicos aproximados, detecção de burst e score de risco heurístico por cliente.
+- **Dashboard web embarcado** servido pelo `esp_http_server`, com páginas de status, DNS,
+  clientes, tráfego, logs e relatório.
+- **Logs em RAM** com níveis e filtragem de polling comum para reduzir ruído.
+- **SNTP** iniciado após o STA conectar (timezone documentado `America/Sao_Paulo`).
+- **Display local opcional** atrás da feature flag `APPLIANCE_V2_ENABLE_DISPLAY`, com estados
+  visuais NORMAL / DNS suspeito / ATTACK (driver/pinout ainda não confirmados em hardware).
 
-## Bibliotecas e arquitetura
+## Arquitetura em alto nível
 
-O `platformio.ini` usa o ambiente `esp32dev` com framework Arduino. A base usa o core Arduino-ESP32 e a biblioteca do INA219:
+```
+        Clientes Wi-Fi                 ESP32 (AP + STA)                 Rede upstream
+   ┌──────────────────┐         ┌──────────────────────────┐         ┌──────────────┐
+   │ celular / notebook│ ──AP──▶ │ DHCP + DNS:53 (monitor)  │         │              │
+   │  192.168.4.x      │         │ NAT/NAPT (pós STA GOT_IP)│ ──STA──▶│  internet /  │
+   │                   │ ◀─HTTP─ │ esp_http_server (painel) │         │  roteador    │
+   └──────────────────┘         │ IDS metadados + score    │         │              │
+                                 │ logs RAM + SNTP + display│         └──────────────┘
+                                 └──────────────────────────┘
+```
 
-- `WiFi.h`;
-- `WebServer.h`;
-- FreeRTOS nativo do Arduino-ESP32;
-- `Adafruit INA219` para tensao, corrente e potencia via I2C.
+Responsabilidades separadas por módulo/task: Wi-Fi (AP+STA), servidor HTTP, monitor DNS
+(task dedicada com stack ampliada e buffers em heap), camada IDS/clientes, logs e display.
 
-A arquitetura ainda esta concentrada em `src/main.cpp`, mas preserva separacao logica por funcoes e estruturas para Wi-Fi, web server, metricas, tasks, API e pagina de evidencias. Separar em modulos fisicos sera feito quando o volume de codigo justificar.
+## Stack e tecnologias
+
+- ESP32 (`board = esp32dev`), flash de 4 MB.
+- **ESP-IDF** como framework, orquestrado via **PlatformIO** (PlatformIO Core 6.1.19).
+- Código em C puro (`main/main.c`).
+- `esp_http_server`, Wi-Fi AP+STA, lwIP com `CONFIG_LWIP_IP_FORWARD` / `CONFIG_LWIP_NAPT`,
+  proxy DNS UDP, SNTP.
+- Tabela de partições `partitions_4mb.csv` (`nvs` / `phy_init` / `factory`) — sem
+  filesystem nesta sprint.
+
+## Trilha atual validada: ESP-IDF Appliance v2
+
+O repositório mantém **duas trilhas que coexistem**, e o histórico de ambas é preservado:
+
+- **Trilha A — Firmware principal (PlatformIO + Arduino)**, na raiz (`src/main.cpp`,
+  `platformio.ini` com `framework = arduino`). Painel web com `WebServer.h` síncrono, firewall
+  didático sobre HTTP, INA219 e LittleFS. Mantida como histórico do projeto.
+- **Trilha B — ESP-IDF Appliance v2**, em `experiments/espidf-appliance-v2/`. **É a trilha
+  ativa e validada atualmente** (branch `experiment/espidf-appliance-v2`), com build e
+  validação funcional em bancada registrados em `evidencias/`.
+
+Esta sprint trata a **Trilha B (ESP-IDF v2) como a trilha validada atual**. A Trilha A não foi
+removida nem depreciada formalmente; a decisão definitiva ESP-IDF vs Arduino permanece como
+item de roadmap.
+
+> Os comandos abaixo assumem a trilha ESP-IDF v2. O diretório do experimento é
+> `experiments/espidf-appliance-v2/`; o smoke tester fica em `tools/` (rodado a partir da raiz
+> do repositório).
 
 ## Como compilar
 
 ```bash
+cd experiments/espidf-appliance-v2
 pio run
 ```
 
-## Como gravar no ESP32
+A configuração local de bancada (SSID/senha da rede upstream) vive em
+`experiments/espidf-appliance-v2/include/config.local.h`, **ignorado pelo Git**. Use o
+template `config.example.h` com placeholders.
+
+## Como fazer upload/flash
+
+> ⚠️ **Cuidado:** o upload grava firmware no ESP32 físico. Só execute com a placa correta
+> conectada e mediante intenção explícita. Confirme a porta serial com `pio device list`
+> antes de gravar.
 
 ```bash
-pio run -t upload
+# a partir de experiments/espidf-appliance-v2
+pio run -t upload --upload-port /dev/ttyUSB0
 ```
+
+Na bancada de referência a porta foi `/dev/ttyUSB0` (conversor USB-serial CH340).
 
 ## Como abrir o monitor serial
 
 ```bash
-pio device monitor -b 115200
+pio device monitor -p /dev/ttyUSB0 -b 115200
 ```
 
-## Como acessar o dashboard
+A velocidade do monitor da v2 é `115200`.
 
-1. Grave o firmware no ESP32.
-2. Conecte o computador ou celular ao Wi-Fi `ESP32-Firewall-Lab`.
-3. Use a credencial de laboratorio configurada no firmware.
-4. Acesse `http://192.168.4.1/` no navegador.
+## Como acessar o dashboard / AP
 
-Rotas principais:
+1. Grave o firmware no ESP32 (passo de upload acima).
+2. Conecte o computador ou celular ao Wi-Fi `ESP32-APPLIANCE-V2` (canal 6, máx. 4 clientes).
+   A senha é de laboratório e não consta nas evidências.
+3. Acesse `http://192.168.4.1/` no navegador.
 
-- Dashboard: `http://192.168.4.1/`
-- Evidencias: `http://192.168.4.1/evidencias`
-- Eventos: `http://192.168.4.1/logs`
-- Alias de eventos: `http://192.168.4.1/eventos`
-- Gateway AP+STA: `http://192.168.4.1/gateway`
-- Demo guiada: `http://192.168.4.1/demo`
-- API de status: `http://192.168.4.1/api/status`
-- API de eventos: `http://192.168.4.1/api/events`
-- Demo INFO: `http://192.168.4.1/demo/info`
-- Demo WARN: `http://192.168.4.1/demo/warn`
-- Demo SECURITY: `http://192.168.4.1/demo/security`
-- Demo flood: `http://192.168.4.1/demo/flood`
-- Demo IDS: `http://192.168.4.1/demo/ids`
+## Endpoints principais
 
+| Rota | Tipo | Descrição |
+| --- | --- | --- |
+| `/` | HTML | Dashboard / painel local |
+| `/api/status` | JSON | Estado operacional, NAT, upstream, DNS, clientes, IDS, display |
+| `/dns` | HTML | Consultas DNS observadas |
+| `/api/dns` | JSON | Histórico recente de DNS (domínio, cliente, tipo, flags de suspeita) |
+| `/clients` | HTML | Clientes observados e classificação |
+| `/api/clients` | JSON | Clientes em RAM, contadores DNS, score e classificação |
+| `/traffic` | HTML | Total de requests, DNS queries, clientes e top routes |
+| `/logs` | HTML | Eventos recentes em RAM (INFO/WARN/ERROR/SECURITY) |
+| `/report` | HTML | Relatório técnico resumido do estado atual |
+| `/demo`, `/demo/scan`, `/demo/security`, `/demo/info` | HTML | Demos didáticas controladas |
 
-## Demo guiada
+Rotas sensíveis didáticas reconhecidas pela camada IDS: `/admin`, `/login`, `/wp-admin`,
+`/etc/passwd`, `/api`, `/config`, `/debug`.
 
-A rota `/demo` centraliza o roteiro de apresentacao do TDE. Ela prioriza o fluxo dashboard, `/traffic`, demo scan, `/logs`, `/report`, smoke real em bancada e offline check durante desenvolvimento remoto via SSH. A pagina tambem lista limitacoes honestas: NAT real fica em PoC separada ESP-IDF, IDS baseado em HTTP do painel, ausencia de inspecao HTTPS e sensores fisicos deixados para fase final.
+## Como rodar o smoke HTTP
 
-## API de status
-
-A rota `/api/status` retorna JSON sem dados sensiveis, incluindo:
-
-- `project_name`;
-- `firmware_version`;
-- `wifi_connected`;
-- `ip`;
-- `uptime_ms`;
-- `free_heap`;
-- `modules`.
-
-Campos legados tambem foram mantidos para compatibilidade com o dashboard atual. A resposta tambem informa `eventCount`, `eventCapacity`, os objetos `energy`, `storage`/`persistence`, `gateway`, `ids` e o objeto `firewall` com `enabled`, `total_requests`, `security_events`, `last_client_ip`, `last_route`, `last_request_ms`, `flood_window_ms`, `flood_threshold`, `ids_enabled`, `ids_events`, `suspicious_404_count` e `sensitive_path_hits`.
-
-## Firewall didatico
-
-O firewall desta fase e uma camada didatica baseada nos acessos HTTP ao painel embarcado. Ele nao inspeciona trafego HTTPS, nao faz NAT, nao substitui roteador real e nao substitui pfSense, OPNsense, Mikrotik, Fortinet, IDS/IPS ou WAF.
-
-Metricas expostas no dashboard e em `/api/status`:
-
-- total de requisicoes HTTP desde o boot;
-- total de eventos `SECURITY`;
-- ultimo IP cliente visto;
-- ultima rota acessada;
-- `millis` da ultima requisicao;
-- regra de flood configurada.
-
-Regra didatica atual: mais de 20 requisicoes em 10 segundos gera evento `SECURITY`, com cooldown para evitar spam no buffer. A rota `/demo/flood` gera uma simulacao controlada de excesso de requisicoes, sem executar ataque real. O IDS didatico tambem registra acessos a rotas inexistentes e caminhos sensiveis simulados, como `/admin`, `/login`, `/etc/passwd` e `/wp-admin`. A rota `/demo/ids` gera uma simulacao controlada de assinatura IDS.
-
-
-## Gateway AP+STA e IDS didatico
-
-O firmware usa `WiFi.mode(WIFI_AP_STA)` para manter o AP local `ESP32-Firewall-Lab` em `http://192.168.4.1` e, opcionalmente, tentar conexao a uma rede Wi-Fi upstream configurada por constantes didaticas no firmware. Os placeholders upstream ficam vazios por padrao, portanto o status esperado sem configuracao e `nao configurado`.
-
-A pagina `/gateway` mostra modo Wi-Fi, SSID/IP do AP, status do upstream, RSSI quando conectado, clientes no AP e contadores do IDS didatico. Nesta sprint, NAT e roteamento sao tratados como tentativa experimental, com status claro quando o core/lwIP nao oferece suporte. O objetivo e telemetria de bancada e eventos de seguranca, nao compartilhar internet nem atuar como firewall profissional de pacotes.
-
-## INA219 e metricas de energia
-
-O INA219 e lido periodicamente pela task de metricas. As paginas e APIs usam um snapshot em memoria; requests HTTP nao fazem leitura direta no barramento I2C.
-
-Ligacao prevista no ESP32:
-
-- `VIN` do INA219 em `3V3` do ESP32;
-- `GND` do INA219 em `GND` comum;
-- `SDA` do INA219 em `GPIO 21`;
-- `SCL` do INA219 em `GPIO 22`;
-- entrada de medicao do INA219 em serie com a carga/fonte conforme o modulo usado na bancada.
-
-Metricas exibidas:
-
-- tensao do barramento em V;
-- tensao no shunt em mV;
-- corrente em mA;
-- potencia em mW;
-- ultimo update em `millis`;
-- estado de alerta.
-
-Se o INA219 nao for detectado no boot, o firmware continua funcionando, registra evento `WARN` e mostra Energia como `indisponivel`. Os thresholds de tensao baixa, corrente alta e potencia alta sao didaticos nesta fase e devem ser calibrados conforme a montagem real.
-
-## API de eventos
-
-A rota `/api/events` retorna JSON leve sem dados sensiveis, com:
-
-- `count`;
-- `capacity`;
-- `events`.
-
-Cada evento contem `id`, `uptime_ms`, `level`, `source`, `message` e, quando aplicavel, `value`. O buffer circular em RAM guarda os ultimos 40 eventos. Eventos relevantes tambem sao persistidos em LittleFS em `/events.log`, enquanto acessos comuns permanecem apenas em RAM para evitar escrita excessiva na flash.
-
-Eventos automaticos atuais:
-
-- boot do sistema;
-- inicio do Wi-Fi AP;
-- inicio do servidor web;
-- acesso a `/evidencias`;
-- acesso a `/api/status`;
-- acesso a `/api/events`;
-- acesso a `/logs` ou `/eventos`;
-- eventos `SECURITY` de flood didatico ou simulacao controlada.
-
-As rotas `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids` geram eventos simulados e controlados para apresentacao. Elas nao representam falha real de hardware nem ataque real; servem para demonstrar os niveis INFO, WARN e SECURITY no dashboard.
-
-## Smoke test HTTP
-
-O projeto inclui um smoke tester local para validar as principais rotas do ESP32 e gerar relatorio Markdown em `evidencias/`. Consulte [docs/smoke-test.md](docs/smoke-test.md).
-
-Comando basico:
+Conectado ao AP do ESP32, a partir da raiz do repositório:
 
 ```bash
-python3 tools/smoke_test_http.py --base-url http://192.168.4.1
+python3 tools/smoke_espidf_v2_http.py --base-url http://192.168.4.1
 ```
 
-## Validacao offline via SSH
+O tester valida 10 rotas principais (`/`, `/api/status`, `/dns`, `/api/dns`, `/clients`,
+`/api/clients`, `/traffic`, `/logs`, `/report`, `/demo/security`) e checa campos de JSON.
 
-Para validar build, rotas registradas, smoke tester, documentacao minima e riscos basicos sem conectar o notebook ao AP do ESP32, use o offline check descrito em [docs/offline-check.md](docs/offline-check.md).
+## Evidências já validadas
 
-```bash
-python3 tools/offline_project_check.py
-```
+Evidências reproduzíveis registradas em `evidencias/` (datadas de 2026-06-01):
 
-## Documentacao tecnica da sprint
+- **Build** — `evidencias/2026-06-01-build-espidf-v2.md`
+  - `pio run` em `experiments/espidf-appliance-v2`: **SUCCESS** em 119,03 s.
+  - RAM 15,3% (50260 / 327680 bytes); Flash 42,9% (899873 / 2097152 bytes).
+  - `firmware.bin` 880K; `firmware.elf` 8.4M (artefatos em `.pio/`, não versionados).
+- **Bancada (validação funcional)** — `evidencias/2026-06-01-bench-espidf-v2.md`
+  - Upload/flash: **SUCCESS** em 20,79 s, porta `/dev/ttyUSB0` (CH340), monitor a 115200.
+  - AP `ESP32-APPLIANCE-V2` em `192.168.4.1`; upstream STA conectado; **NAT `active=true`**.
+  - Smoke HTTP: **PASS, 10/10 endpoints**.
+  - DNS: total 101, suspeitos 10; `malware.test` classificado como suspeito.
+  - Cliente `192.168.4.2` com `risk_score=53`, classificação `suspeito`.
+  - Estado de display lógico: `ATTACK`.
 
-Documentos de apoio para arquitetura, defesa e escopo:
+Material cru (logs, prints brutos) fica em `evidencias/raw/` e não é versionado.
 
-- [Arquitetura tecnica](docs/arquitetura-tecnica.md)
-- [Roteiro de demo](docs/roteiro-demo.md)
-- [Referencia de API e rotas](docs/api-reference.md)
-- [Decisoes de escopo](docs/decisoes-escopo.md)
-- [Backlog final](docs/backlog-final.md)
-- [Diagrama de arquitetura Mermaid](docs/diagrama-arquitetura.mmd)
+## Estado atual do projeto
 
-## Evidencias
+- Branch de trabalho: `experiment/espidf-appliance-v2`.
+- Trilha ESP-IDF v2 com **build e validação funcional de bancada concluídos e evidenciados**.
+- AP, NAT real, monitor DNS, IDS de metadados, dashboard e smoke HTTP funcionando em hardware.
+- Eventos e métricas mantidos majoritariamente em RAM (sem persistência nesta sprint).
+- Display local validado em estado lógico (`ATTACK`), mas driver/pinout físico ainda não
+  confirmados — recurso permanece atrás de feature flag.
 
-O roteiro de prints fica em [docs/evidencias.md](docs/evidencias.md). A pagina `/evidencias` mostra versao, IP local, Wi-Fi, uptime, heap livre, resumo de seguranca, resumo de energia, status dos modulos, quantidade de eventos e os ultimos 5 eventos reais. Prints recomendados: dashboard principal, `/demo`, `/gateway`, `/evidencias`, `/logs`, `/api/status`, `/api/events` e uma sequencia gerando eventos por `/demo/info`, `/demo/warn`, `/demo/security`, `/demo/flood` e `/demo/ids`.
+## Limitações conhecidas
 
+- Sistema **didático/acadêmico**: não é firewall profissional de produção.
+- **Sem inspeção de conteúdo HTTPS** — o monitor DNS observa apenas metadados de consultas
+  (A/AAAA), não conteúdo criptografado.
+- Eventos e métricas são **RAM-only** nesta sprint; sem histórico de 24 h persistido.
+- **Score de risco é heurístico** e apenas indicativo (+5 por domínio suspeito, +1 por burst
+  DNS, +2 por muitos domínios únicos; faixas 0–4 baixo, 5–14 atenção, 15+ suspeito).
+- **Capacidade pequena de clientes** (máx. 4 no AP).
+- Classificação de domínios é heurística e tem falsos negativos conhecidos: na bancada,
+  `suspicious.example` e a digitação `phising.local` **não** foram marcados como suspeitos.
+  Isso é comportamento esperado da heurística atual, **registrado como limitação, não como
+  sucesso**.
+- Proxy DNS é mínimo, experimental e de melhor esforço (sem bloqueio de tráfego).
 
-## Logs persistentes em LittleFS
+## Roadmap próximo
 
-O firmware usa LittleFS para persistir apenas eventos relevantes em `/events.log`. O objetivo e manter evidencias importantes apos reboot sem gravar na flash em todo request comum.
+1. Estabilizar a documentação operacional (README, docs/).
+2. Confirmar formalmente a trilha ativa: ESP-IDF Appliance v2 vs firmware Arduino.
+3. Avaliar persistência de eventos/métricas (hoje em RAM) rumo ao histórico de 24 h do TDE.
+4. Revisar a heurística de classificação de domínios suspeitos com mais amostras controladas.
+5. Confirmar controlador/pinout do display físico para habilitar a camada visual.
+6. Consolidar evidências finais e preparar a documentação ABNT / apresentação do TDE.
 
-Politica de persistencia:
+## Segurança e escopo didático
 
-- persistir `WARN`, `ERROR` e `SECURITY`;
-- persistir eventos importantes de `SYSTEM`, `STORAGE`, `SENSOR`, `ENERGY` e flood do `FIREWALL`;
-- nao persistir acessos comuns como `/api/status` e `/api/events`;
-- nao gravar em loop rapido nem em leitura normal de sensor.
+Este projeto é de laboratório e existe para fins de ensino e demonstração. Ele **não**:
+inspeciona HTTPS, substitui firewall/roteador profissional, entrega IDS/IPS, WAF, SIEM ou
+VPN reais. Credenciais reais (SSID/senha upstream) ficam apenas em arquivos locais ignorados
+pelo Git (`include/config.local.h`); nunca devem ser commitadas. Evidências não contêm
+senhas, IPs públicos reais nem identidades sensíveis. O upload no ESP32 e o smoke HTTP só
+devem ser executados em bancada controlada, com intenção explícita.
 
-Formato: JSON Lines, uma linha por evento, com `persisted_id`, `id`, `uptime_ms`, `level`, `source`, `message` e `value` quando existir. O limite atual e de 16 KB. Ao ultrapassar o limite, a decisao adotada nesta fase e rotacao simples: apagar `/events.log` e iniciar um novo arquivo. Essa escolha prioriza simplicidade e reduz risco de travamento em bancada.
+## Documentação de apoio
 
-Rotas relacionadas:
-
-- `/api/events`: eventos recentes em RAM;
-- `/api/events/persistent`: linhas persistidas no LittleFS;
-- `/logs/clear-persistent`: limpa o arquivo persistente e registra evento de limpeza manual.
-
-A rota de limpeza e didatica de laboratorio e nao possui autenticacao nesta fase. Nao usar em rede publica.
-
-## Configuracao Wi-Fi upstream
-
-A rota `/wifi` permite configurar a rede Wi-Fi upstream usada pela interface AP+STA didatica. O AP local `ESP32-Firewall-Lab` continua ativo em `192.168.4.1` para recuperacao mesmo se a conexao upstream falhar.
-
-A configuracao salva mostra apenas SSID e indicadores de estado. A credencial/passphrase nao e exibida na pagina, em `/api/status`, em logs ou no Serial. Nesta fase a pagina nao possui autenticacao; usar apenas em ambiente de laboratorio controlado. NAT agora e experimental e continua sem promessa de roteador profissional.
-
-## NAT experimental
-
-A sprint `0.12.0-sprint-nat-experimental` adiciona uma tentativa controlada de NAT/NAPT para clientes conectados ao AP `ESP32-Firewall-Lab` usarem o upstream Wi-Fi configurado em `/wifi`. A feature flag `NAT_EXPERIMENTAL_ENABLED` permite desabilitar a tentativa rapidamente se houver instabilidade.
-
-No core Arduino-ESP32 instalado neste ambiente, os headers de NAPT existem, mas a biblioteca lwIP usada pelo build pode nao exportar suporte NAPT/IP forward. Quando isso ocorrer, `/gateway` e `/api/status` mostram NAT como `nao suportado`, sem travar o firmware. O AP local, `/wifi`, dashboard e logs continuam acessiveis.
-
-Teste manual: conectar o ESP32 ao upstream pela pagina `/wifi`, conectar um cliente ao AP do ESP32 e tentar abrir um site HTTP/HTTPS. O resultado depende do core/lwIP, da rede upstream e do cliente. NAT experimental nao substitui roteador, firewall profissional ou IDS/IPS.
-
-## Traffic Monitor v0.1
-
-A branch `main` agora apresenta o sistema como mini appliance didatico: Mini IDS portatil, Mini Firewall Gateway e monitor ciberfisico em ESP32. A rota `/traffic` mostra um snapshot em RAM do trafego HTTP recebido pelo painel: total de requests, 404, rotas sensiveis, eventos IDS, ultimo IP, ultima rota, User-Agent resumido e top rotas.
-
-A API `/api/traffic` expoe os mesmos dados em JSON, e `/api/status` inclui o objeto `traffic` para o dashboard e o smoke tester. A rota `/demo/scan` gera uma simulacao controlada de scan HTTP e registra evento `SECURITY` com origem `IDS`.
-
-Limitacao: o monitor e didatico e observa apenas requisicoes HTTP recebidas pelo servidor web embarcado. Ele nao faz sniffing de pacotes, nao inspeciona HTTPS, nao substitui IDS/IPS profissional e nao transforma o ESP32 em firewall de producao. NAT real validado em ESP-IDF permanece na PoC separada; a `main` continua como painel/appliance principal em PlatformIO + Arduino + `WebServer.h`.
-
-## Relatorio de evidencia embarcado
-
-A rota `/report` apresenta um relatorio tecnico simples do estado atual do prototipo, com identificacao do projeto, status geral, rede/gateway, firewall/IDS didatico, Traffic Monitor, logs, persistencia, eventos recentes, limitacoes e passos de validacao.
-
-A rota `/api/report` expoe o mesmo resumo em JSON para auditoria e smoke test, sem substituir `/api/status`, `/api/traffic` ou `/evidencias`. O relatorio embarcado facilita a apresentacao local; o smoke test externo continua sendo a validacao repetivel executada pelo notebook.
-
-## Horario relativo nos eventos
-
-As paginas `/logs`, `/eventos`, `/report` e as APIs de eventos exibem `time_label` no formato `HH:MM:SS.mmm`, calculado a partir de `millis()` desde o boot do ESP32. O campo tecnico `uptime_ms` continua disponivel para precisao e compatibilidade.
-
-Esse horario nao e relogio real de calendario. NTP ou RTC podem ser melhorias futuras, mas nao fazem parte desta sprint.
+- Plano da PoC v2: `docs/espidf-v2-plan.md`
+- Checklist de bancada v2: `docs/espidf-v2-bench-qa.md`
+- Guia de evidências v2: `docs/espidf-v2-evidence-guide.md`
+- Sanidade de flash/partição: `docs/espidf-v2-flash-partition-sanity.md`
+- Smoke test: `docs/smoke-test.md` · Offline check: `docs/offline-check.md`
+- Arquitetura, hardware, hardening, runbook e testes: pasta `docs/`
