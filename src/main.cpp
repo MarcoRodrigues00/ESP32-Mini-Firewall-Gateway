@@ -10,12 +10,21 @@
 #include <cstdio>
 #include <cstring>
 
+// Credencial do AP de laboratorio fica fora do git (include/secrets.h, ignorado).
+// Copie include/secrets_example.h para include/secrets.h e defina a sua.
+#if __has_include("secrets.h")
+#include "secrets.h"
+#endif
+#ifndef LAB_AP_PASSPHRASE
+#error "Defina LAB_AP_PASSPHRASE em include/secrets.h (modelo: include/secrets_example.h)"
+#endif
+
 namespace {
 constexpr const char *PROJECT_NAME = "ESP32 Mini Firewall Gateway";
 constexpr const char *PROJECT_VERSION = "0.12.0-sprint-nat-experimental";
 constexpr const char *PROJECT_PHASE = "Sprint NAT experimental AP+STA";
 constexpr const char *AP_SSID = "ESP32-Firewall-Lab";
-constexpr const char *AP_PASSPHRASE = "esp32lab123";
+constexpr const char *AP_PASSPHRASE = LAB_AP_PASSPHRASE;
 constexpr bool NAT_EXPERIMENTAL_ENABLED = true;
 constexpr unsigned long UPSTREAM_CONNECT_TIMEOUT_MS = 3000UL;
 constexpr unsigned long HEARTBEAT_INTERVAL_MS = 5000UL;

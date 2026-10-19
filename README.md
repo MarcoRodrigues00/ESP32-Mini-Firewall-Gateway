@@ -28,6 +28,17 @@ A base atual compila para `esp32dev` e inclui:
 
 Ainda estao planejados para fases posteriores: sensores adicionais, atuadores, logs persistentes em LittleFS, configuracao dinamica, interrupcao de hardware e gerenciamento de energia mais completo. O firewall atual e didatico e limitado aos acessos HTTP ao painel.
 
+## Credencial do AP de laboratorio
+
+A senha do Wi-Fi do AP (`ESP32-Firewall-Lab`) **nao fica no codigo**. Antes de compilar:
+
+```bash
+cp include/secrets_example.h include/secrets.h
+# edite include/secrets.h e defina LAB_AP_PASSPHRASE (8 a 63 caracteres)
+```
+
+`include/secrets.h` e ignorado pelo git (`secrets.*` no `.gitignore`). Sem ele, o build falha de proposito com uma mensagem explicando o passo acima.
+
 ## Componentes planejados
 
 - ESP32 com display, se o driver for confirmado;
