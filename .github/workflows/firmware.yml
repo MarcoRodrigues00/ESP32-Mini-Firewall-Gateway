@@ -1,0 +1,79 @@
+name: Firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PLATFORMIO_VERSION: 6.2.0
+  GITLEAKS_VERSION: 8.21.2
+  GITLEAKS_SHA256: 5bc41815076e6ed6ef8fbecc9d9b75bcae31f39029ceb55da08086315316e3ba
+
+jobs:
+  build:
+    name: Build (PlatformIO · esp32dev)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Instalar PlatformIO
+        run: pip install "platformio==${PLATFORMIO_VERSION}"
+
+      - name: Credencial de laboratório só para compilar
+        # O include/secrets.h real fica fora do git; no CI usamos o modelo público.
+        run: cp include/secrets_example.h include/secrets.h
+
+      - name: Compilar o firmware
+        shell: bash
+        run: pio run -e esp32dev | tee build.log
+
+      - name: Registrar uso de memória e versões
+        shell: bash
+        run: |
+          {
+            echo "### Firmware esp32dev"
+            echo '```'
+            grep -E "^(RAM|Flash):" build.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          mem=$(grep -E "^(RAM|Flash):" build.log | sed -E 's/\[[^]]*\]//; s/ +/ /g' | paste -sd ';' -)
+          echo "::notice title=Uso de memória::${mem}"
+          # Lê a saída inteira antes de filtrar: cortar o pipe no meio derruba o pio com BrokenPipe.
+          pio pkg list -e esp32dev > pkgs.txt 2>&1 || true
+          platform=$(grep -i -m1 "platform" pkgs.txt | sed -E 's/^[^A-Za-z]*//' || true)
+          echo "::notice title=Plataforma::${platform}"
+
+  secrets:
+    name: Segredos (Gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Instalar Gitleaks
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -sSfLo gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar xzf gitleaks.tgz gitleaks
+
+      - name: Varrer o histórico inteiro do git
+        run: '"$RUNNER_TEMP/gitleaks" git . --redact --verbose'
