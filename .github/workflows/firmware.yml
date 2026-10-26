@@ -53,7 +53,9 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           mem=$(grep -E "^(RAM|Flash):" build.log | sed -E 's/\[[^]]*\]//; s/ +/ /g' | paste -sd ';' -)
           echo "::notice title=Uso de memória::${mem}"
-          platform=$(pio pkg list -e esp32dev 2>/dev/null | grep -m1 -i "platform" | sed -E 's/^[^A-Za-z]*//')
+          # Lê a saída inteira antes de filtrar: cortar o pipe no meio derruba o pio com BrokenPipe.
+          pio pkg list -e esp32dev > pkgs.txt 2>&1 || true
+          platform=$(grep -i -m1 "platform" pkgs.txt | sed -E 's/^[^A-Za-z]*//' || true)
           echo "::notice title=Plataforma::${platform}"
 
   secrets:
