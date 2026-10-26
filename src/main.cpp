@@ -1432,9 +1432,9 @@ void appendEventsTableHtml(String &html, size_t limit)
         html += F("</span></td><td><span class=\"source-tag\">");
         html += event.source;
         html += F("</span></td><td>");
-        html += event.message;
+        appendHtmlEscaped(html, event.message);
         html += F("</td><td>");
-        html += event.hasValue ? event.value : "-";
+        appendHtmlEscaped(html, event.hasValue ? event.value : "-");
         html += F("</td></tr>");
     }
     html += F("</tbody></table>");
@@ -1702,7 +1702,7 @@ String evidencePage()
     html += F("</span></div><div class=\"metric\"><strong>Eventos SECURITY</strong><span>");
     html += firewall.securityEvents;
     html += F("</span></div><div class=\"metric\"><strong>Ultima rota</strong><span>");
-    html += firewall.lastRoute;
+    appendHtmlEscaped(html, firewall.lastRoute);
     html += F("</span></div></div><p class=\"note\">Deteccao didatica baseada em acessos HTTP ao painel; nao substitui firewall profissional.</p></div>");
     html += F("<div class=\"panel\"><h2>Wi-Fi upstream</h2><div class=\"grid summary\"><div class=\"metric\"><strong>Configurado</strong><span>");
     html += gateway.staConfigured ? "sim" : "nao";
@@ -2015,7 +2015,7 @@ String buildWifiPage()
     html += F(" ms</span></div><div class=\"metric\"><strong>Ultimo status</strong><span>");
     appendHtmlEscaped(html, gateway.lastStatus);
     html += F("</span></div><div class=\"metric\"><strong>Ultimo erro</strong><span>");
-    html += gateway.lastError[0] != '\0' ? gateway.lastError : "n/d";
+    appendHtmlEscaped(html, gateway.lastError[0] != '\0' ? gateway.lastError : "n/d");
     html += F("</span></div></div><p class=\"note\">O AP local <code>ESP32-Firewall-Lab</code> continua ativo em <code>192.168.4.1</code> para recuperacao mesmo se o upstream falhar. Esta pagina nao possui autenticacao nesta fase; use apenas em laboratorio controlado.</p></div>");
     html += F("<div class=\"panel\"><h2>Configurar upstream</h2><form method=\"post\" action=\"/wifi/save\"><div class=\"grid\"><div><label for=\"ssid\">SSID upstream</label><input id=\"ssid\" name=\"ssid\" maxlength=\"32\" value=\"");
     if (gateway.staConfigured) {
@@ -2055,7 +2055,7 @@ String buildGatewayPage()
     html += F("</span></span></div><div class=\"metric\"><strong>Status</strong><span>");
     html += gatewayStatusText(gateway);
     html += F("</span></div><div class=\"metric\"><strong>SSID upstream</strong><span>");
-    html += gateway.upstreamSsid;
+    appendHtmlEscaped(html, gateway.upstreamSsid);
     html += F("</span></div><div class=\"metric\"><strong>IP upstream</strong><span>");
     html += gateway.upstreamIp;
     html += F("</span></div><div class=\"metric\"><strong>RSSI</strong><span>");
